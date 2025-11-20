@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stalker IPTV Player</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      color: #333;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .header {
+      text-align: center;
+      color: white;
+      margin-bottom: 30px;
+    }
+
+    .header h1 {
+      font-size: 2.5rem;
+      margin-bottom: 10px;
+      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    }
+
+    .header p {
+      font-size: 1.1rem;
+      opacity: 0.9;
+    }
+
+    .login-card {
+      background: white;
+      border-radius: 15px;
+      padding: 40px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      max-width: 500px;
+      margin: 0 auto;
+    }
+
+    .login-card h2 {
+      margin-bottom: 20px;
+      color: #667eea;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    .form-group label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+      color: #555;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e1e8ed;
+      border-radius: 8px;
+      font-size: 1rem;
+      transition: border-color 0.3s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .form-group small {
+      display: block;
+      margin-top: 5px;
+      color: #888;
+      font-size: 0.85rem;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 1.1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .error-message {
+      background: #fee;
+      color: #c33;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      border-left: 4px solid #c33;
+    }
+
+    .player-container {
+      background: white;
+      border-radius: 15px;
+      padding: 20px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      margin-bottom: 20px;
+    }
+
+    .video-wrapper {
+      position: relative;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .controls button {
+      padding: 10px 20px;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background 0.3s;
+    }
+
+    .controls button:hover {
+      background: #5568d3;
+    }
+
+    .channels-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+    }
+
+    .channel-card {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+
+    .channel-card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+    }
+
+    .channel-card.active {
+      border: 3px solid #667eea;
+      background: #f8f9ff;
+    }
+
+    .channel-logo {
+      width: 60px;
+      height: 60px;
+      object-fit: contain;
+      margin-bottom: 15px;
+      border-radius: 8px;
+    }
+
+    .channel-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 5px;
+    }
+
+    .channel-number {
+      color: #888;
+      font-size: 0.9rem;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: white;
+      font-size: 1.2rem;
+    }
+
+    .loading-spinner {
+      border: 4px solid rgba(255,255,255,0.3);
+      border-top: 4px solid white;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      margin: 20px auto;
+    }
+
+    @keyframes spin {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+
+    .search-box {
+      margin-bottom: 20px;
+      background: white;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+
+    .search-box input {
+      width: 100%;
+      padding: 12px;
+      border: 2px solid #e1e8ed;
+      border-radius: 8px;
+      font-size: 1rem;
+    }
+
+    .stats {
+      background: white;
+      padding: 15px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+    }
+
+    .stats-item {
+      text-align: center;
+    }
+
+    .stats-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: #667eea;
+    }
+
+    .stats-label {
+      font-size: 0.9rem;
+      color: #888;
+      margin-top: 5px;
+    }
+
+    .now-playing {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 15px;
+      border-radius: 10px;
+      margin-bottom: 15px;
+    }
+
+    .now-playing h3 {
+      margin-bottom: 5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const API_URL = 'http://localhost:3001/api';
+
+    function App() {
+      const [isAuthenticated, setIsAuthenticated] = useState(false);
+      const [sessionId, setSessionId] = useState('');
+      const [portalUrl, setPortalUrl] = useState('');
+      const [macAddress, setMacAddress] = useState('');
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState('');
+      const [channels, setChannels] = useState([]);
+      const [currentChannel, setCurrentChannel] = useState(null);
+      const [searchTerm, setSearchTerm] = useState('');
+      const videoRef = useRef(null);
+      const hlsRef = useRef(null);
+
+      // Handle login/authentication
+      const handleLogin = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+
+        try {
+          const response = await fetch(`${API_URL}/handshake`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ portalUrl, macAddress })
+          });
+
+          const data = await response.json();
+
+          if (data.success) {
+            setSessionId(data.sessionId);
+            setIsAuthenticated(true);
+            loadChannels(data.sessionId);
+          } else {
+            setError(data.error || 'Failed to authenticate');
+          }
+        } catch (err) {
+          setError('Connection error: ' + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Load channels
+      const loadChannels = async (sessId) => {
+        setLoading(true);
+        try {
+          const response = await fetch(`${API_URL}/channels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: sessId })
+          });
+
+          const data = await response.json();
+
+          if (data.success) {
+            setChannels(data.channels);
+          } else {
+            setError(data.error || 'Failed to load channels');
+          }
+        } catch (err) {
+          setError('Failed to load channels: ' + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Play channel
+      const playChannel = async (channel) => {
+        setLoading(true);
+        setCurrentChannel(channel);
+
+        try {
+          const response = await fetch(`${API_URL}/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              sessionId, 
+              channelId: channel.id,
+              cmd: channel.cmd 
+            })
+          });
+
+          const data = await response.json();
+
+          if (data.success && data.streamUrl) {
+            loadStream(data.streamUrl);
+          } else {
+            setError('Failed to get stream URL');
+          }
+        } catch (err) {
+          setError('Failed to play channel: ' + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Load stream with HLS.js
+      const loadStream = (streamUrl) => {
+        const video = videoRef.current;
+
+        if (!video) return;
+
+        // Clean up previous HLS instance
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+        }
+
+        if (Hls.isSupported()) {
+          const hls = new Hls({
+            enableWorker: true,
+            lowLatencyMode: true,
+          });
+
+          hls.loadSource(streamUrl);
+          hls.attachMedia(video);
+
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            video.play().catch(err => console.error('Play error:', err));
+          });
+
+          hls.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+              console.error('HLS Fatal Error:', data);
+              setError('Stream playback error');
+            }
+          });
+
+          hlsRef.current = hls;
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          // Native HLS support (Safari)
+          video.src = streamUrl;
+          video.addEventListener('loadedmetadata', () => {
+            video.play().catch(err => console.error('Play error:', err));
+          });
+        }
+      };
+
+      // Filter channels by search
+      const filteredChannels = channels.filter(ch =>
+        ch.name.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+
+      // Cleanup on unmount
+      useEffect(() => {
+        return () => {
+          if (hlsRef.current) {
+            hlsRef.current.destroy();
+          }
+        };
+      }, []);
+
+      if (!isAuthenticated) {
+        return (
+          <div className="container">
+            <div className="header">
+              <h1>📺 Stalker IPTV Player</h1>
+              <p>Enter your Stalker portal credentials to start watching</p>
+            </div>
+
+            <div className="login-card">
+              <h2>Login</h2>
+              
+              {error && <div className="error-message">{error}</div>}
+
+              <form onSubmit={handleLogin}>
+                <div className="form-group">
+                  <label>Portal URL</label>
+                  <input
+                    type="text"
+                    value={portalUrl}
+                    onChange={(e) => setPortalUrl(e.target.value)}
+                    placeholder="http://example.com/stalker_portal/c"
+                    required
+                  />
+                  <small>Example: http://portal.example.com/stalker_portal/c</small>
+                </div>
+
+                <div className="form-group">
+                  <label>MAC Address</label>
+                  <input
+                    type="text"
+                    value={macAddress}
+                    onChange={(e) => setMacAddress(e.target.value)}
+                    placeholder="00:1A:79:XX:XX:XX"
+                    pattern="[0-9A-Fa-f:]{17}"
+                    required
+                  />
+                  <small>Format: 00:1A:79:XX:XX:XX</small>
+                </div>
+
+                <button type="submit" className="btn" disabled={loading}>
+                  {loading ? 'Connecting...' : 'Connect'}
+                </button>
+              </form>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div className="container">
+          <div className="header">
+            <h1>📺 Stalker IPTV Player</h1>
+            <p>Enjoy your IPTV channels</p>
+          </div>
+
+          {error && <div className="error-message">{error}</div>}
+
+          <div className="stats">
+            <div className="stats-item">
+              <div className="stats-value">{channels.length}</div>
+              <div className="stats-label">Total Channels</div>
+            </div>
+            <div className="stats-item">
+              <div className="stats-value">{filteredChannels.length}</div>
+              <div className="stats-label">Filtered</div>
+            </div>
+            <div className="stats-item">
+              <div className="stats-value">{currentChannel ? '▶️ Playing' : '⏸️ Paused'}</div>
+              <div className="stats-label">Status</div>
+            </div>
+          </div>
+
+          {currentChannel && (
+            <div className="player-container">
+              <div className="now-playing">
+                <h3>Now Playing</h3>
+                <p>{currentChannel.name} (Ch. {currentChannel.number})</p>
+              </div>
+              
+              <div className="video-wrapper">
+                <video 
+                  ref={videoRef}
+                  controls
+                  autoPlay
+                  style={{ width: '100%', maxHeight: '600px' }}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className="search-box">
+            <input
+              type="text"
+              placeholder="🔍 Search channels..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+            />
+          </div>
+
+          {loading && (
+            <div className="loading">
+              <div className="loading-spinner"></div>
+              Loading...
+            </div>
+          )}
+
+          <div className="channels-grid">
+            {filteredChannels.map((channel) => (
+              <div
+                key={channel.id}
+                className={`channel-card ${currentChannel?.id === channel.id ? 'active' : ''}`}
+                onClick={() => playChannel(channel)}
+              >
+                {channel.logo && (
+                  <img
+                    src={channel.logo}
+                    alt={channel.name}
+                    className="channel-logo"
+                    onError={(e) => e.target.style.display = 'none'}
+                  />
+                )}
+                <div className="channel-name">{channel.name}</div>
+                <div className="channel-number">Channel {channel.number}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
