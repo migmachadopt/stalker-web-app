@@ -8,6 +8,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <style>
     * {
       margin: 0;
@@ -16,46 +17,34 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #fff;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Login Screen */
+    .login-screen {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       min-height: 100vh;
-      color: #333;
-    }
-
-    .container {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-
-    .header {
-      text-align: center;
-      color: white;
-      margin-bottom: 30px;
-    }
-
-    .header h1 {
-      font-size: 2.5rem;
-      margin-bottom: 10px;
-      text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-    }
-
-    .header p {
-      font-size: 1.1rem;
-      opacity: 0.9;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
     }
 
     .login-card {
-      background: white;
-      border-radius: 15px;
+      background: #1e1e2e;
+      border-radius: 16px;
       padding: 40px;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-      max-width: 500px;
-      margin: 0 auto;
+      width: 400px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
     }
 
-    .login-card h2 {
-      margin-bottom: 20px;
+    .login-card h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      font-size: 1.8rem;
       color: #667eea;
     }
 
@@ -66,29 +55,23 @@
     .form-group label {
       display: block;
       margin-bottom: 8px;
-      font-weight: 600;
-      color: #555;
+      color: #888;
+      font-size: 0.9rem;
     }
 
     .form-group input {
       width: 100%;
-      padding: 12px;
-      border: 2px solid #e1e8ed;
+      padding: 12px 16px;
+      background: #2a2a3e;
+      border: 2px solid #3a3a4e;
       border-radius: 8px;
+      color: #fff;
       font-size: 1rem;
-      transition: border-color 0.3s;
     }
 
     .form-group input:focus {
       outline: none;
       border-color: #667eea;
-    }
-
-    .form-group small {
-      display: block;
-      margin-top: 5px;
-      color: #888;
-      font-size: 0.85rem;
     }
 
     .btn {
@@ -98,7 +81,7 @@
       color: white;
       border: none;
       border-radius: 8px;
-      font-size: 1.1rem;
+      font-size: 1rem;
       font-weight: 600;
       cursor: pointer;
       transition: transform 0.2s, box-shadow 0.2s;
@@ -106,7 +89,7 @@
 
     .btn:hover {
       transform: translateY(-2px);
-      box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+      box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
     }
 
     .btn:disabled {
@@ -115,178 +98,381 @@
       transform: none;
     }
 
-    .error-message {
-      background: #fee;
-      color: #c33;
+    .error-msg {
+      background: rgba(255,100,100,0.2);
+      border: 1px solid #ff6464;
+      color: #ff6464;
       padding: 12px;
       border-radius: 8px;
       margin-bottom: 20px;
-      border-left: 4px solid #c33;
+      font-size: 0.9rem;
     }
 
-    .player-container {
-      background: white;
-      border-radius: 15px;
+    /* Loading Screen */
+    .loading-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    }
+
+    .spinner {
+      width: 60px;
+      height: 60px;
+      border: 4px solid #333;
+      border-top-color: #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .loading-text {
+      margin-top: 20px;
+      font-size: 1.2rem;
+      color: #888;
+    }
+
+    .loading-progress {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: #667eea;
+    }
+
+    /* Main Layout */
+    .app-layout {
+      display: flex;
+      height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 280px;
+      background: #1a1a2e;
+      border-right: 1px solid #2a2a3e;
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+
+    .sidebar-header {
       padding: 20px;
-      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-      margin-bottom: 20px;
+      border-bottom: 1px solid #2a2a3e;
     }
 
-    .video-wrapper {
-      position: relative;
-      background: #000;
+    .sidebar-header h2 {
+      font-size: 1.2rem;
+      color: #667eea;
+      margin-bottom: 10px;
+    }
+
+    .search-input {
+      width: 100%;
+      padding: 10px 14px;
+      background: #2a2a3e;
+      border: 1px solid #3a3a4e;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 0.9rem;
+    }
+
+    .search-input:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .groups-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+
+    .group-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      margin-bottom: 4px;
+      background: transparent;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .group-item:hover {
+      background: #2a2a3e;
+    }
+
+    .group-item.active {
+      background: #667eea;
+    }
+
+    .group-item .name {
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+
+    .group-item .count {
+      font-size: 0.8rem;
+      color: #888;
+      background: #2a2a3e;
+      padding: 2px 8px;
       border-radius: 10px;
+    }
+
+    .group-item.active .count {
+      background: rgba(255,255,255,0.2);
+      color: #fff;
+    }
+
+    /* Main Content */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
-      margin-bottom: 20px;
+    }
+
+    /* Player Section */
+    .player-section {
+      background: #000;
+      position: relative;
+    }
+
+    .player-section.minimized {
+      height: 0;
+      overflow: hidden;
+    }
+
+    .player-section.normal {
+      height: 400px;
+    }
+
+    .player-section.fullscreen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 100vh;
+      z-index: 1000;
+    }
+
+    .video-container {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
     video {
-      width: 100%;
-      height: auto;
-      display: block;
+      max-width: 100%;
+      max-height: 100%;
+      background: #000;
     }
 
-    .controls {
+    .now-playing-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      padding: 15px 20px;
+      background: linear-gradient(transparent, rgba(0,0,0,0.9));
       display: flex;
-      gap: 10px;
-      margin-top: 10px;
+      align-items: center;
+      justify-content: space-between;
     }
 
-    .controls button {
-      padding: 10px 20px;
-      background: #667eea;
-      color: white;
+    .now-playing-info h3 {
+      font-size: 1.1rem;
+      margin-bottom: 4px;
+    }
+
+    .now-playing-info span {
+      font-size: 0.85rem;
+      color: #888;
+    }
+
+    .player-controls button {
+      background: rgba(255,255,255,0.1);
       border: none;
+      color: #fff;
+      padding: 8px 16px;
+      margin-left: 8px;
       border-radius: 6px;
       cursor: pointer;
-      font-weight: 500;
-      transition: background 0.3s;
+      font-size: 0.9rem;
     }
 
-    .controls button:hover {
-      background: #5568d3;
+    .player-controls button:hover {
+      background: rgba(255,255,255,0.2);
+    }
+
+    /* Channels Section */
+    .channels-section {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      background: #0f0f1a;
+    }
+
+    .channels-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .channels-header h2 {
+      font-size: 1.3rem;
+    }
+
+    .channels-header span {
+      color: #888;
+      font-size: 0.9rem;
     }
 
     .channels-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 20px;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
     }
 
     .channel-card {
-      background: white;
-      border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      background: #1a1a2e;
+      border-radius: 10px;
+      padding: 16px;
       cursor: pointer;
-      transition: transform 0.2s, box-shadow 0.2s;
+      transition: transform 0.2s, background 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
 
     .channel-card:hover {
-      transform: translateY(-5px);
-      box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+      background: #2a2a3e;
+      transform: translateY(-2px);
     }
 
-    .channel-card.active {
-      border: 3px solid #667eea;
-      background: #f8f9ff;
+    .channel-card.playing {
+      background: #667eea;
     }
 
     .channel-logo {
-      width: 60px;
-      height: 60px;
-      object-fit: contain;
-      margin-bottom: 15px;
+      width: 50px;
+      height: 50px;
       border-radius: 8px;
+      object-fit: contain;
+      background: #2a2a3e;
+    }
+
+    .channel-info {
+      flex: 1;
+      min-width: 0;
     }
 
     .channel-name {
-      font-size: 1.1rem;
-      font-weight: 600;
-      color: #333;
-      margin-bottom: 5px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .channel-number {
+      font-size: 0.8rem;
       color: #888;
-      font-size: 0.9rem;
+      margin-top: 2px;
     }
 
-    .loading {
-      text-align: center;
-      padding: 40px;
-      color: white;
-      font-size: 1.2rem;
+    .channel-card.playing .channel-number {
+      color: rgba(255,255,255,0.7);
     }
 
-    .loading-spinner {
-      border: 4px solid rgba(255,255,255,0.3);
-      border-top: 4px solid white;
-      border-radius: 50%;
-      width: 50px;
-      height: 50px;
-      animation: spin 1s linear infinite;
-      margin: 20px auto;
+    /* Debug Panel */
+    .debug-panel {
+      position: fixed;
+      bottom: 0;
+      right: 0;
+      width: 400px;
+      max-height: 300px;
+      background: #1a1a2e;
+      border-top-left-radius: 10px;
+      border: 1px solid #2a2a3e;
+      z-index: 100;
     }
 
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-
-    .search-box {
-      margin-bottom: 20px;
-      background: white;
-      padding: 20px;
-      border-radius: 12px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-    }
-
-    .search-box input {
-      width: 100%;
-      padding: 12px;
-      border: 2px solid #e1e8ed;
-      border-radius: 8px;
-      font-size: 1rem;
-    }
-
-    .stats {
-      background: white;
-      padding: 15px;
-      border-radius: 10px;
-      margin-bottom: 20px;
+    .debug-header {
       display: flex;
-      justify-content: space-between;
       align-items: center;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      justify-content: space-between;
+      padding: 10px 15px;
+      background: #2a2a3e;
+      border-top-left-radius: 10px;
+      cursor: pointer;
     }
 
-    .stats-item {
-      text-align: center;
-    }
-
-    .stats-value {
-      font-size: 1.5rem;
-      font-weight: 700;
-      color: #667eea;
-    }
-
-    .stats-label {
-      font-size: 0.9rem;
+    .debug-header h4 {
+      font-size: 0.85rem;
       color: #888;
-      margin-top: 5px;
     }
 
-    .now-playing {
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      color: white;
-      padding: 15px;
-      border-radius: 10px;
-      margin-bottom: 15px;
+    .debug-content {
+      max-height: 250px;
+      overflow-y: auto;
+      padding: 10px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #0f0;
     }
 
-    .now-playing h3 {
-      margin-bottom: 5px;
+    .debug-content.hidden {
+      display: none;
+    }
+
+    .debug-controls {
+      display: flex;
+      gap: 8px;
+      padding: 8px 10px;
+      background: #2a2a3e;
+    }
+
+    .debug-controls button {
+      padding: 4px 10px;
+      background: #3a3a4e;
+      border: none;
+      border-radius: 4px;
+      color: #888;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+
+    .debug-controls button:hover {
+      background: #4a4a5e;
+      color: #fff;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #1a1a2e;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #3a3a4e;
+      border-radius: 4px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #4a4a5e;
     }
   </style>
 </head>
@@ -295,82 +481,167 @@
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
-
     const API_URL = 'http://localhost:3001/api';
 
+    // Nomes dos grupos (baseado nos IDs encontrados)
+    const GROUP_NAMES = {
+      4: 'Generalistas',
+      6: 'Infantil',
+      8: 'Documentários',
+      9: 'Filmes',
+      11: 'Séries',
+      13: 'Desporto',
+      14: 'Notícias',
+      15: 'Música',
+      18: 'Entretenimento',
+      19: 'Internacionais',
+      20: 'Adultos',
+      42: 'Religiosos',
+      43: 'Regionais',
+      59: 'Brasil',
+      67: 'Espanha',
+      69: 'França',
+      70: 'UK',
+      71: 'Outros'
+    };
+
     function App() {
-      const [isAuthenticated, setIsAuthenticated] = useState(false);
-      const [sessionId, setSessionId] = useState('');
+      // States
+      const [screen, setScreen] = useState('login'); // login, loading, main
+      const [error, setError] = useState('');
+      const [loadingProgress, setLoadingProgress] = useState('');
+      
+      // Auth
       const [portalUrl, setPortalUrl] = useState('');
       const [macAddress, setMacAddress] = useState('');
-      const [loading, setLoading] = useState(false);
-      const [error, setError] = useState('');
+      const [sessionId, setSessionId] = useState('');
+      
+      // Data
       const [channels, setChannels] = useState([]);
-      const [currentChannel, setCurrentChannel] = useState(null);
+      const [groups, setGroups] = useState([]);
+      const [selectedGroup, setSelectedGroup] = useState(null);
       const [searchTerm, setSearchTerm] = useState('');
+      
+      // Player
+      const [currentChannel, setCurrentChannel] = useState(null);
+      const [playerMode, setPlayerMode] = useState('normal'); // minimized, normal, fullscreen
       const videoRef = useRef(null);
-      const hlsRef = useRef(null);
+      const playerRef = useRef(null);
+      
+      // Debug
+      const [debugLog, setDebugLog] = useState([]);
+      const [debugVisible, setDebugVisible] = useState(true);
 
-      // Handle login/authentication
+      const addLog = (msg) => {
+        const time = new Date().toLocaleTimeString();
+        setDebugLog(prev => [...prev.slice(-50), `[${time}] ${msg}`]);
+        console.log(msg);
+      };
+
+      // Login
       const handleLogin = async (e) => {
         e.preventDefault();
-        setLoading(true);
         setError('');
+        setScreen('loading');
+        setLoadingProgress('Connecting...');
 
         try {
-          const response = await fetch(`${API_URL}/handshake`, {
+          addLog('🔄 Connecting to portal...');
+          
+          const authRes = await fetch(`${API_URL}/handshake`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ portalUrl, macAddress })
           });
-
-          const data = await response.json();
-
-          if (data.success) {
-            setSessionId(data.sessionId);
-            setIsAuthenticated(true);
-            loadChannels(data.sessionId);
-          } else {
-            setError(data.error || 'Failed to authenticate');
+          
+          const authData = await authRes.json();
+          
+          if (!authData.success) {
+            throw new Error(authData.error || 'Authentication failed');
           }
+          
+          setSessionId(authData.sessionId);
+          addLog('✅ Authenticated!');
+          setLoadingProgress('Loading channels...');
+          
+          // Load channels
+          const chRes = await fetch(`${API_URL}/channels`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId: authData.sessionId })
+          });
+          
+          const chData = await chRes.json();
+          
+          if (!chData.success) {
+            throw new Error(chData.error || 'Failed to load channels');
+          }
+          
+          addLog(`✅ Loaded ${chData.channels.length} channels`);
+          setChannels(chData.channels);
+          
+          // Extract groups
+          const groupMap = {};
+          chData.channels.forEach(ch => {
+            const gid = ch.tv_genre_id || 0;
+            if (!groupMap[gid]) {
+              groupMap[gid] = {
+                id: gid,
+                name: GROUP_NAMES[gid] || `Group ${gid}`,
+                count: 0
+              };
+            }
+            groupMap[gid].count++;
+          });
+          
+          const groupList = Object.values(groupMap).sort((a, b) => b.count - a.count);
+          setGroups(groupList);
+          addLog(`📋 Found ${groupList.length} groups`);
+          
+          // Select first group
+          if (groupList.length > 0) {
+            setSelectedGroup(groupList[0].id);
+          }
+          
+          setScreen('main');
+          
         } catch (err) {
-          setError('Connection error: ' + err.message);
-        } finally {
-          setLoading(false);
+          addLog(`❌ Error: ${err.message}`);
+          setError(err.message);
+          setScreen('login');
         }
       };
 
-      // Load channels
-      const loadChannels = async (sessId) => {
-        setLoading(true);
-        try {
-          const response = await fetch(`${API_URL}/channels`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sessionId: sessId })
-          });
-
-          const data = await response.json();
-
-          if (data.success) {
-            setChannels(data.channels);
-          } else {
-            setError(data.error || 'Failed to load channels');
-          }
-        } catch (err) {
-          setError('Failed to load channels: ' + err.message);
-        } finally {
-          setLoading(false);
+      // Get filtered channels
+      const getFilteredChannels = () => {
+        let filtered = channels;
+        
+        if (selectedGroup !== null) {
+          filtered = filtered.filter(ch => ch.tv_genre_id === selectedGroup);
         }
+        
+        if (searchTerm) {
+          const term = searchTerm.toLowerCase();
+          filtered = filtered.filter(ch => 
+            ch.name.toLowerCase().includes(term) ||
+            ch.number.toString().includes(term)
+          );
+        }
+        
+        return filtered;
       };
 
       // Play channel
       const playChannel = async (channel) => {
-        setLoading(true);
+        addLog(`🔄 Playing: ${channel.name}`);
         setCurrentChannel(channel);
+        
+        if (playerMode === 'minimized') {
+          setPlayerMode('normal');
+        }
 
         try {
-          const response = await fetch(`${API_URL}/stream`, {
+          const res = await fetch(`${API_URL}/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
@@ -379,89 +650,210 @@
               cmd: channel.cmd 
             })
           });
-
-          const data = await response.json();
-
+          
+          const data = await res.json();
+          
           if (data.success && data.streamUrl) {
+            addLog(`✅ Stream URL received`);
             loadStream(data.streamUrl);
           } else {
-            setError('Failed to get stream URL');
+            addLog(`❌ Failed to get stream`);
           }
         } catch (err) {
-          setError('Failed to play channel: ' + err.message);
-        } finally {
-          setLoading(false);
+          addLog(`❌ Error: ${err.message}`);
         }
       };
 
-      // Load stream with HLS.js
+      // Load stream with mpegts.js
       const loadStream = (streamUrl) => {
         const video = videoRef.current;
-
         if (!video) return;
 
-        // Clean up previous HLS instance
-        if (hlsRef.current) {
-          hlsRef.current.destroy();
+        // Cleanup
+        if (playerRef.current) {
+          if (playerRef.current.destroy) playerRef.current.destroy();
+          else if (playerRef.current.unload) {
+            playerRef.current.unload();
+            playerRef.current.detachMediaElement();
+          }
+          playerRef.current = null;
         }
 
-        if (Hls.isSupported()) {
-          const hls = new Hls({
-            enableWorker: true,
-            lowLatencyMode: true,
+        if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
+          addLog('📺 Using mpegts.js');
+          
+          // Check codec support
+          const videoCodec = 'video/mp4; codecs="avc1.640028"';
+          const audioCodec = 'audio/mp4; codecs="mp4a.40.2"';
+          const videoSupported = MediaSource.isTypeSupported(videoCodec);
+          const audioSupported = MediaSource.isTypeSupported(audioCodec);
+          addLog(`🔍 Codec support: video=${videoSupported}, audio=${audioSupported}`);
+          
+          if (!videoSupported) {
+            addLog('❌ Video codec avc1.640028 NOT supported by browser!');
+          }
+          
+          const player = mpegts.createPlayer({
+            type: 'mpegts',
+            isLive: true,
+            url: streamUrl,
+          }, {
+            enableWorker: false,
+            enableStashBuffer: true,
+            stashInitialSize: 128 * 1024,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 10,
+            fixAudioTimestampGap: true,
+            accurateSeek: false,
+            lazyLoad: false,
+            deferLoadAfterSourceOpen: false,
+            reuseRedirectedURL: true,
+            seekType: 'range',
           });
 
-          hls.loadSource(streamUrl);
-          hls.attachMedia(video);
+          player.attachMediaElement(video);
+          player.load();
+          
+          // Listen for ALL errors including internal ones
+          player.on(mpegts.Events.ERROR, (type, detail, info) => {
+            addLog(`❌ mpegts ERROR: ${type} - ${detail}`);
+            if (info) {
+              addLog(`   Info: ${JSON.stringify(info).substring(0, 300)}`);
+            }
+          });
+          
+          // Monitor SourceBuffer errors via video element
+          video.onerror = (e) => {
+            const err = video.error;
+            addLog(`❌ Video Error: code=${err?.code}, message=${err?.message}`);
+          };
 
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            video.play().catch(err => console.error('Play error:', err));
+          player.on(mpegts.Events.MEDIA_INFO, (info) => {
+            addLog(`📊 ${info.videoCodec}, ${info.width}x${info.height}, ${info.fps}fps`);
+            addLog(`📊 Audio: ${info.audioCodec}, ${info.audioSampleRate}Hz`);
           });
 
-          hls.on(Hls.Events.ERROR, (event, data) => {
-            if (data.fatal) {
-              console.error('HLS Fatal Error:', data);
-              setError('Stream playback error');
+          player.on(mpegts.Events.ERROR, (type, detail, info) => {
+            addLog(`❌ ${type}: ${detail}`);
+            console.error('mpegts error:', type, detail, info);
+          });
+
+          player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+            // Log initial stats to see if data is flowing
+            if (stats.totalSegmentCount <= 2 || (stats.decodedFrames > 0 && stats.decodedFrames % 125 === 0)) {
+              addLog(`📈 Speed: ${Math.round(stats.speed)}KB/s, Decoded: ${stats.decodedFrames}, Dropped: ${stats.droppedFrames}`);
             }
           });
 
-          hlsRef.current = hls;
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-          // Native HLS support (Safari)
-          video.src = streamUrl;
-          video.addEventListener('loadedmetadata', () => {
-            video.play().catch(err => console.error('Play error:', err));
+          // Monitor loading
+          player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            addLog('⚠️ Loading complete (stream ended?)');
           });
+
+          player.on(mpegts.Events.RECOVERED_EARLY_EOF, () => {
+            addLog('⚠️ Recovered from early EOF');
+          });
+
+          player.on(mpegts.Events.METADATA_ARRIVED, () => {
+            addLog('📋 Metadata arrived');
+          });
+
+          let hasPlayed = false;
+          let playAttempts = 0;
+          
+          // Prevent browser from pausing video-only media
+          video.muted = false;
+          video.volume = 1.0;
+          
+          video.oncanplay = () => {
+            if (!hasPlayed) {
+              addLog('✅ Can play - attempting...');
+              // Keep video unmuted to prevent "background media" pause
+              video.muted = false;
+              video.play().then(() => {
+                hasPlayed = true;
+              }).catch((e) => {
+                addLog(`⚠️ Play failed: ${e.message}`);
+                // Try muted as fallback
+                video.muted = true;
+                video.play().then(() => {
+                  addLog('✅ Playing muted');
+                  hasPlayed = true;
+                  // Unmute after a delay
+                  setTimeout(() => {
+                    video.muted = false;
+                    addLog('🔊 Unmuted');
+                  }, 2000);
+                }).catch(e2 => addLog(`❌ Muted play also failed: ${e2.message}`));
+              });
+            }
+          };
+
+          video.onwaiting = () => {
+            addLog('⏳ Buffering...');
+          };
+
+          video.onstalled = () => {
+            addLog('⚠️ Stalled!');
+          };
+          
+          video.onpause = () => {
+            // Detect unexpected pauses
+            if (hasPlayed && !video.ended) {
+              addLog('⚠️ Video paused unexpectedly, resuming...');
+              video.play().catch(() => {});
+            }
+          };
+
+          // Check if stream is stuck after 5 seconds
+          setTimeout(() => {
+            if (!hasPlayed && video.readyState < 3) {
+              addLog(`⚠️ Stream stuck! readyState=${video.readyState}, buffered=${video.buffered.length}`);
+              addLog(`⚠️ currentTime=${video.currentTime}, paused=${video.paused}`);
+              
+              // Try to force play with muted
+              addLog('🔄 Forcing muted play...');
+              video.muted = true;
+              video.play().then(() => {
+                addLog('✅ Force play worked!');
+                setTimeout(() => { 
+                  video.muted = false; 
+                  addLog('🔊 Unmuted');
+                }, 2000);
+              }).catch(e => addLog(`❌ Force play failed: ${e.message}`));
+            }
+          }, 5000);
+
+          video.onplaying = () => addLog('▶️ Playing!');
+
+          playerRef.current = player;
         }
       };
-
-      // Filter channels by search
-      const filteredChannels = channels.filter(ch =>
-        ch.name.toLowerCase().includes(searchTerm.toLowerCase())
-      );
 
       // Cleanup on unmount
       useEffect(() => {
         return () => {
-          if (hlsRef.current) {
-            hlsRef.current.destroy();
+          if (playerRef.current) {
+            if (playerRef.current.destroy) playerRef.current.destroy();
           }
         };
       }, []);
 
-      if (!isAuthenticated) {
+      // Copy logs
+      const copyLogs = () => {
+        navigator.clipboard.writeText(debugLog.join('\n'));
+      };
+
+      // Render Login Screen
+      if (screen === 'login') {
         return (
-          <div className="container">
-            <div className="header">
-              <h1>📺 Stalker IPTV Player</h1>
-              <p>Enter your Stalker portal credentials to start watching</p>
-            </div>
-
+          <div className="login-screen">
             <div className="login-card">
-              <h2>Login</h2>
+              <h1>📺 IPTV Player</h1>
               
-              {error && <div className="error-message">{error}</div>}
-
+              {error && <div className="error-msg">{error}</div>}
+              
               <form onSubmit={handleLogin}>
                 <div className="form-group">
                   <label>Portal URL</label>
@@ -469,12 +861,11 @@
                     type="text"
                     value={portalUrl}
                     onChange={(e) => setPortalUrl(e.target.value)}
-                    placeholder="http://example.com/stalker_portal/c"
+                    placeholder="http://example.com"
                     required
                   />
-                  <small>Example: http://portal.example.com/stalker_portal/c</small>
                 </div>
-
+                
                 <div className="form-group">
                   <label>MAC Address</label>
                   <input
@@ -482,98 +873,139 @@
                     value={macAddress}
                     onChange={(e) => setMacAddress(e.target.value)}
                     placeholder="00:1A:79:XX:XX:XX"
-                    pattern="[0-9A-Fa-f:]{17}"
                     required
                   />
-                  <small>Format: 00:1A:79:XX:XX:XX</small>
                 </div>
-
-                <button type="submit" className="btn" disabled={loading}>
-                  {loading ? 'Connecting...' : 'Connect'}
-                </button>
+                
+                <button type="submit" className="btn">Connect</button>
               </form>
             </div>
           </div>
         );
       }
 
+      // Render Loading Screen
+      if (screen === 'loading') {
+        return (
+          <div className="loading-screen">
+            <div className="spinner"></div>
+            <div className="loading-text">Loading IPTV</div>
+            <div className="loading-progress">{loadingProgress}</div>
+          </div>
+        );
+      }
+
+      // Render Main Screen
+      const filteredChannels = getFilteredChannels();
+
       return (
-        <div className="container">
-          <div className="header">
-            <h1>📺 Stalker IPTV Player</h1>
-            <p>Enjoy your IPTV channels</p>
-          </div>
-
-          {error && <div className="error-message">{error}</div>}
-
-          <div className="stats">
-            <div className="stats-item">
-              <div className="stats-value">{channels.length}</div>
-              <div className="stats-label">Total Channels</div>
+        <div className="app-layout">
+          {/* Sidebar */}
+          <div className="sidebar">
+            <div className="sidebar-header">
+              <h2>📺 IPTV Player</h2>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="🔍 Search channels..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
             </div>
-            <div className="stats-item">
-              <div className="stats-value">{filteredChannels.length}</div>
-              <div className="stats-label">Filtered</div>
-            </div>
-            <div className="stats-item">
-              <div className="stats-value">{currentChannel ? '▶️ Playing' : '⏸️ Paused'}</div>
-              <div className="stats-label">Status</div>
-            </div>
-          </div>
-
-          {currentChannel && (
-            <div className="player-container">
-              <div className="now-playing">
-                <h3>Now Playing</h3>
-                <p>{currentChannel.name} (Ch. {currentChannel.number})</p>
+            
+            <div className="groups-list">
+              <div
+                className={`group-item ${selectedGroup === null ? 'active' : ''}`}
+                onClick={() => setSelectedGroup(null)}
+              >
+                <span className="name">All Channels</span>
+                <span className="count">{channels.length}</span>
               </div>
               
-              <div className="video-wrapper">
-                <video 
-                  ref={videoRef}
-                  controls
-                  autoPlay
-                  style={{ width: '100%', maxHeight: '600px' }}
-                />
-              </div>
+              {groups.map(group => (
+                <div
+                  key={group.id}
+                  className={`group-item ${selectedGroup === group.id ? 'active' : ''}`}
+                  onClick={() => setSelectedGroup(group.id)}
+                >
+                  <span className="name">{group.name}</span>
+                  <span className="count">{group.count}</span>
+                </div>
+              ))}
             </div>
-          )}
-
-          <div className="search-box">
-            <input
-              type="text"
-              placeholder="🔍 Search channels..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-            />
           </div>
 
-          {loading && (
-            <div className="loading">
-              <div className="loading-spinner"></div>
-              Loading...
-            </div>
-          )}
-
-          <div className="channels-grid">
-            {filteredChannels.map((channel) => (
-              <div
-                key={channel.id}
-                className={`channel-card ${currentChannel?.id === channel.id ? 'active' : ''}`}
-                onClick={() => playChannel(channel)}
-              >
-                {channel.logo && (
-                  <img
-                    src={channel.logo}
-                    alt={channel.name}
-                    className="channel-logo"
-                    onError={(e) => e.target.style.display = 'none'}
-                  />
-                )}
-                <div className="channel-name">{channel.name}</div>
-                <div className="channel-number">Channel {channel.number}</div>
+          {/* Main Content */}
+          <div className="main-content">
+            {/* Player */}
+            <div className={`player-section ${playerMode}`}>
+              <div className="video-container">
+                <video ref={videoRef} controls />
               </div>
-            ))}
+              
+              {currentChannel && playerMode !== 'minimized' && (
+                <div className="now-playing-bar">
+                  <div className="now-playing-info">
+                    <h3>{currentChannel.name}</h3>
+                    <span>Channel {currentChannel.number}</span>
+                  </div>
+                  <div className="player-controls">
+                    <button onClick={() => setPlayerMode('minimized')}>⬇️ Minimize</button>
+                    <button onClick={() => setPlayerMode(playerMode === 'fullscreen' ? 'normal' : 'fullscreen')}>
+                      {playerMode === 'fullscreen' ? '⬜ Exit' : '⬜ Fullscreen'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Channels */}
+            <div className="channels-section">
+              <div className="channels-header">
+                <h2>{selectedGroup === null ? 'All Channels' : (GROUP_NAMES[selectedGroup] || `Group ${selectedGroup}`)}</h2>
+                <span>{filteredChannels.length} channels</span>
+              </div>
+              
+              <div className="channels-grid">
+                {filteredChannels.map(channel => (
+                  <div
+                    key={channel.id}
+                    className={`channel-card ${currentChannel?.id === channel.id ? 'playing' : ''}`}
+                    onClick={() => playChannel(channel)}
+                  >
+                    <img
+                      src={channel.logo || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%232a2a3e" width="100" height="100"/><text x="50" y="55" text-anchor="middle" fill="%23667eea" font-size="30">TV</text></svg>'}
+                      alt=""
+                      className="channel-logo"
+                      onError={(e) => e.target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%232a2a3e" width="100" height="100"/><text x="50" y="55" text-anchor="middle" fill="%23667eea" font-size="30">TV</text></svg>'}
+                    />
+                    <div className="channel-info">
+                      <div className="channel-name">{channel.name}</div>
+                      <div className="channel-number">Ch. {channel.number}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Debug Panel */}
+          <div className="debug-panel">
+            <div className="debug-header" onClick={() => setDebugVisible(!debugVisible)}>
+              <h4>🔧 Debug Log ({debugLog.length})</h4>
+              <span>{debugVisible ? '▼' : '▲'}</span>
+            </div>
+            {debugVisible && (
+              <>
+                <div className="debug-controls">
+                  <button onClick={copyLogs}>📋 Copy</button>
+                  <button onClick={() => setDebugLog([])}>🗑️ Clear</button>
+                </div>
+                <div className="debug-content">
+                  {debugLog.map((log, i) => <div key={i}>{log}</div>)}
+                </div>
+              </>
+            )}
           </div>
         </div>
       );
