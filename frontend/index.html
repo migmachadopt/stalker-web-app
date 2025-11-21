@@ -250,12 +250,12 @@
           }, { 
             enableWorker: false, 
             enableStashBuffer: true, 
-            stashInitialSize: 512 * 1024,
+            stashInitialSize: 1024 * 1024,
             autoCleanupSourceBuffer: true, 
             fixAudioTimestampGap: true,
-            liveBufferLatencyChasing: true,
-            liveBufferLatencyMaxLatency: 1.5,
-            liveBufferLatencyMinRemain: 0.3
+            liveBufferLatencyChasing: false,
+            autoCleanupMinBackwardDuration: 60,
+            autoCleanupMaxBackwardDuration: 120
           });
           
           player.attachMediaElement(video); 
@@ -287,6 +287,9 @@
           player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
             if (stats.decodedFrames === 0 && stats.droppedFrames > 0) {
               addLog(`⚠️ Frames dropped: ${stats.droppedFrames} - possível codec não suportado`);
+            }
+            if (stats.speed) {
+              addLog(`📈 Speed: ${Math.round(stats.speed)} KB/s, Dropped: ${stats.droppedFrames}`);
             }
           });
           
