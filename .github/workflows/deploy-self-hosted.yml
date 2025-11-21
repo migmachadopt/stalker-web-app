@@ -1,0 +1,212 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🚀 GitHub Actions - Deploy com Self-Hosted Runner
+# ═══════════════════════════════════════════════════════════════════════════════
+# Este workflow usa um runner instalado diretamente no Raspberry Pi
+# Não precisa de SSH externo - o runner já está na máquina de destino!
+
+name: 🍓 Deploy to Raspberry Pi (Self-Hosted)
+
+on:
+  push:
+    branches:
+      - deploy  # Muda para 'main' quando estiveres pronto
+  
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  APP_DIR: /opt/iptv-player
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 1: Testes (corre na cloud)
+  # ═══════════════════════════════════════════════════════════════════════════
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.skip_tests != 'true' }}
+    
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: 📦 Install dependencies
+        working-directory: ./backend
+        run: npm ci
+
+      - name: 🧪 Check syntax
+        working-directory: ./backend
+        run: node --check server.js
+
+      - name: ✅ Tests passed
+        run: echo "All tests passed!"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 2: Deploy (corre no Raspberry Pi)
+  # ═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: 🚀 Deploy
+    runs-on: self-hosted  # ← Isto faz o job correr no Raspberry Pi!
+    needs: [test]
+    if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    
+    steps:
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+
+      - name: 📋 Info do sistema
+        run: |
+          echo "🖥️  Hostname: $(hostname)"
+          echo "📍 IP: $(hostname -I | awk '{print $1}')"
+          echo "🐧 OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+          echo "📦 Node: $(node --version)"
+          echo "📦 NPM: $(npm --version)"
+
+      - name: 📁 Preparar diretórios
+        run: |
+          sudo mkdir -p ${{ env.APP_DIR }}/{backend,frontend,logs,data}
+          sudo chown -R iptv:iptv ${{ env.APP_DIR }}
+
+      - name: 📤 Copiar Backend
+        run: |
+          echo "📦 Copiando backend..."
+          # Preservar .env e data se existirem
+          if [ -f "${{ env.APP_DIR }}/.env" ]; then
+            cp ${{ env.APP_DIR }}/.env /tmp/.env.backup
+          fi
+          if [ -d "${{ env.APP_DIR }}/backend/data" ]; then
+            cp -r ${{ env.APP_DIR }}/backend/data /tmp/data.backup
+          fi
+          
+          # Copiar novos ficheiros
+          sudo rsync -av --delete \
+            --exclude 'node_modules' \
+            --exclude '.env' \
+            --exclude 'data' \
+            ./backend/ ${{ env.APP_DIR }}/backend/
+          
+          # Restaurar ficheiros preservados
+          if [ -f "/tmp/.env.backup" ]; then
+            cp /tmp/.env.backup ${{ env.APP_DIR }}/.env
+          fi
+          if [ -d "/tmp/data.backup" ]; then
+            cp -r /tmp/data.backup/* ${{ env.APP_DIR }}/backend/data/ 2>/dev/null || true
+          fi
+
+      - name: 📤 Copiar Frontend
+        run: |
+          echo "📦 Copiando frontend..."
+          sudo rsync -av --delete ./frontend/ ${{ env.APP_DIR }}/frontend/
+
+      - name: 📦 Instalar dependências
+        run: |
+          cd ${{ env.APP_DIR }}/backend
+          sudo -u iptv npm ci --production
+
+      - name: 🔐 Verificar .env
+        run: |
+          if [ ! -f "${{ env.APP_DIR }}/.env" ]; then
+            echo "⚠️ Criando .env com valores default..."
+            cat > /tmp/.env.new << 'EOF'
+          NODE_ENV=production
+          PORT=3001
+          ENCRYPTION_KEY=$(openssl rand -hex 32)
+          JWT_SECRET=$(openssl rand -hex 64)
+          EOF
+            sudo mv /tmp/.env.new ${{ env.APP_DIR }}/.env
+            sudo chown iptv:iptv ${{ env.APP_DIR }}/.env
+            sudo chmod 600 ${{ env.APP_DIR }}/.env
+          fi
+
+      - name: 🔄 Reiniciar Backend
+        run: |
+          cd ${{ env.APP_DIR }}
+          
+          # Verificar se PM2 está instalado
+          if ! command -v pm2 &> /dev/null; then
+            echo "📦 Instalando PM2..."
+            sudo npm install -g pm2
+          fi
+          
+          # Restart ou start
+          if sudo -u iptv pm2 describe iptv-backend > /dev/null 2>&1; then
+            echo "🔄 Reiniciando aplicação..."
+            sudo -u iptv pm2 restart iptv-backend --update-env
+          else
+            echo "🚀 Iniciando aplicação pela primeira vez..."
+            cd ${{ env.APP_DIR }}/backend
+            sudo -u iptv pm2 start server.js --name iptv-backend
+          fi
+          
+          # Guardar configuração PM2
+          sudo -u iptv pm2 save
+
+      - name: ⏳ Aguardar inicialização
+        run: sleep 5
+
+      - name: ✅ Health Check
+        run: |
+          echo "🔍 Verificando saúde da aplicação..."
+          
+          for i in {1..5}; do
+            response=$(curl -s http://localhost:3001/api/health || echo "FAILED")
+            
+            if echo "$response" | grep -q "ok"; then
+              echo "✅ Aplicação está online!"
+              echo "$response" | jq . 2>/dev/null || echo "$response"
+              exit 0
+            fi
+            
+            echo "⏳ Tentativa $i/5 - Aguardando..."
+            sleep 3
+          done
+          
+          echo "❌ Health check falhou após 5 tentativas"
+          sudo -u iptv pm2 logs iptv-backend --lines 50
+          exit 1
+
+      - name: 📊 Estado Final
+        if: always()
+        run: |
+          echo ""
+          echo "╔═══════════════════════════════════════════════════════════════╗"
+          echo "║                    📊 ESTADO DO SISTEMA                       ║"
+          echo "╚═══════════════════════════════════════════════════════════════╝"
+          echo ""
+          sudo -u iptv pm2 status
+          echo ""
+          echo "🌐 Aplicação disponível em: http://$(hostname -I | awk '{print $1}')"
+          echo ""
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Job 3: Cleanup
+  # ═══════════════════════════════════════════════════════════════════════════
+  cleanup:
+    name: 🧹 Cleanup
+    runs-on: self-hosted
+    needs: deploy
+    if: always()
+    
+    steps:
+      - name: 🧹 Limpar cache
+        run: |
+          # Limpar ficheiros temporários
+          rm -f /tmp/.env.backup
+          rm -rf /tmp/data.backup
+          
+          # Limpar cache do npm se ficar muito grande
+          npm cache clean --force 2>/dev/null || true
+          
+          echo "✅ Limpeza concluída"
