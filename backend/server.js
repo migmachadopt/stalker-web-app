@@ -976,6 +976,7 @@ async function resolveRedirects(url, headers, maxRedirects = 10) {
 }
 
 // Proxy endpoint - CORRIGIDO
+// Proxy endpoint - CORRIGIDO v2
 app.get('/api/proxy', async (req, res) => {
   try {
     const { url } = req.query;
@@ -993,36 +994,28 @@ app.get('/api/proxy', async (req, res) => {
       'Connection': 'Keep-Alive',
     };
 
-    // Resolver redirects manualmente primeiro
-    let finalUrl;
-    try {
-      finalUrl = await resolveRedirects(url, playerHeaders);
-      console.log(`✅ Final URL: ${finalUrl.substring(0, 80)}...`);
-    } catch (redirectError) {
-      console.error(`❌ Redirect error: ${redirectError.message}`);
-      // Se falhar a resolver redirects, tenta diretamente
-      finalUrl = url;
-    }
-
-    // Agora faz o stream do URL final
-    const response = await axios.get(finalUrl, {
+    // Fazer pedido seguindo redirects automaticamente
+    const response = await axios({
+      method: 'get',
+      url: url,
       responseType: 'stream',
       timeout: 30000,
-      maxRedirects: 5,  // Permite alguns redirects adicionais
-      validateStatus: (status) => status === 200,
+      maxRedirects: 10,
       headers: playerHeaders,
-      // Importante para HTTPS
+      validateStatus: (status) => status >= 200 && status < 300,
+      // Aceitar certificados HTTPS
       httpsAgent: new (require('https').Agent)({
-        rejectUnauthorized: false  // Aceita certificados self-signed
+        rejectUnauthorized: false
       })
     });
 
+    const finalUrl = response.request.res.responseUrl || url;
     const contentType = response.headers['content-type'] || '';
     
+    console.log(`✅ Final URL: ${finalUrl.substring(0, 80)}...`);
     console.log(`📦 Content-Type: ${contentType}`);
     
     if (contentType.includes('mpegurl') || contentType.includes('m3u8') || finalUrl.includes('.m3u8')) {
-      // É um playlist HLS - precisa de processar
       let content = '';
       response.data.on('data', chunk => content += chunk);
       await new Promise((resolve, reject) => {
@@ -1032,7 +1025,6 @@ app.get('/api/proxy', async (req, res) => {
 
       const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
       
-      // Reescrever URLs no playlist para passar pelo proxy
       content = content.replace(/(^[^#\n][^\n]*)/gm, (match) => {
         match = match.trim();
         if (!match || match.startsWith('#')) return match;
@@ -1050,17 +1042,14 @@ app.get('/api/proxy', async (req, res) => {
       res.set('Cache-Control', 'no-cache');
       return res.send(content);
     } else {
-      // É um stream de video direto
       res.set('Content-Type', contentType || 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Cache-Control', 'no-cache');
       res.set('Connection', 'keep-alive');
       res.set('Transfer-Encoding', 'chunked');
       
-      // Pipe do stream para a resposta
       response.data.pipe(res);
       
-      // Cleanup quando a conexão fechar
       req.on('close', () => {
         response.data.destroy();
       });
@@ -1070,7 +1059,6 @@ app.get('/api/proxy', async (req, res) => {
     console.error('❌ Proxy Error:', error.message);
     if (error.response) {
       console.error(`   Status: ${error.response.status}`);
-      console.error(`   Headers: ${JSON.stringify(error.response.headers)}`);
     }
     res.status(error.response?.status || 500).send('Proxy error: ' + error.message);
   }
