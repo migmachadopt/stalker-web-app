@@ -82,19 +82,22 @@ jobs:
       - name: 📤 Copiar Backend
         run: |
           echo "📦 Copiando backend..."
+          
+          # Criar pasta data se não existir (ANTES do rsync)
+          sudo mkdir -p ${{ env.APP_DIR }}/backend/data
+          
           # Preservar .env e data se existirem
           if [ -f "${{ env.APP_DIR }}/.env" ]; then
             sudo cp ${{ env.APP_DIR }}/.env /tmp/.env.backup
           fi
-          if [ -d "${{ env.APP_DIR }}/backend/data" ]; then
+          if [ -d "${{ env.APP_DIR }}/backend/data" ] && [ "$(ls -A ${{ env.APP_DIR }}/backend/data)" ]; then
             sudo cp -r ${{ env.APP_DIR }}/backend/data /tmp/data.backup
           fi
           
-          # Copiar novos ficheiros
-          sudo rsync -av --delete \
+          # Copiar novos ficheiros (SEM --delete na pasta data)
+          sudo rsync -av \
             --exclude 'node_modules' \
-            --exclude '.env' \
-            --exclude 'data' \
+            --delete --exclude 'data' \
             ./backend/ ${{ env.APP_DIR }}/backend/
           
           # Restaurar ficheiros preservados
@@ -102,6 +105,7 @@ jobs:
             sudo cp /tmp/.env.backup ${{ env.APP_DIR }}/.env
           fi
           if [ -d "/tmp/data.backup" ]; then
+            sudo mkdir -p ${{ env.APP_DIR }}/backend/data
             sudo cp -r /tmp/data.backup/* ${{ env.APP_DIR }}/backend/data/ 2>/dev/null || true
           fi
           
