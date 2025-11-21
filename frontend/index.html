@@ -256,7 +256,7 @@
           player.attachMediaElement(video); 
           player.load();
           
-          // Logging detalhado
+          // Logging detalhado - player events
           player.on(mpegts.Events.ERROR, (type, detail, info) => {
             addLog(`❌ ERROR: ${type} - ${detail}`);
             if (info) addLog(`   Info: ${JSON.stringify(info)}`);
@@ -266,11 +266,7 @@
             addLog(`📊 Video: ${info.videoCodec || 'unknown'}, ${info.width}x${info.height}`);
             addLog(`📊 Audio: ${info.audioCodec || 'unknown'}, ${info.audioSampleRate}Hz`);
             
-            // Detectar H.265
             if (info.videoCodec && info.videoCodec.toLowerCase().includes('hevc')) {
-              addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
-            }
-            if (info.videoCodec && info.videoCodec.toLowerCase().includes('hev')) {
               addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
             }
           });
@@ -280,8 +276,38 @@
               addLog(`⚠️ Frames dropped: ${stats.droppedFrames} - possível codec não suportado`);
             }
           });
+          
+          player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            addLog(`✅ Loading complete`);
+          });
+
+          player.on(mpegts.Events.RECOVERED_EARLY_EOF, () => {
+            addLog(`⚠️ Recovered from early EOF`);
+          });
+          
+          // Logging detalhado - video events
+          video.onloadstart = () => addLog(`🔄 Video load started`);
+          video.onloadeddata = () => addLog(`✅ Video data loaded`);
+          video.onerror = (e) => {
+            addLog(`❌ Video error: ${video.error?.message || 'unknown'}`);
+            addLog(`   Code: ${video.error?.code}`);
+          };
+          video.onstalled = () => addLog(`⚠️ Video stalled`);
+          video.onwaiting = () => addLog(`⏳ Video waiting for data...`);
+          
           let hasPlayed = false; video.muted = false; video.volume = 1.0;
-          video.oncanplay = () => { if (!hasPlayed) { video.play().then(() => hasPlayed = true).catch(() => { video.muted = true; video.play().then(() => { hasPlayed = true; setTimeout(() => video.muted = false, 2000); }); }); } };
+          video.oncanplay = () => { 
+            addLog(`✅ Video can play`);
+            if (!hasPlayed) { 
+              video.play().then(() => hasPlayed = true).catch(() => { 
+                video.muted = true; 
+                video.play().then(() => { 
+                  hasPlayed = true; 
+                  setTimeout(() => video.muted = false, 2000); 
+                }); 
+              }); 
+            } 
+          };
           video.onplaying = () => addLog('▶️ Playing!');
           playerRef.current = player;
         }
