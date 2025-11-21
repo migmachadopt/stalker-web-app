@@ -244,7 +244,8 @@
           const player = mpegts.createPlayer({ 
             type: 'mpegts', 
             isLive: true, 
-            url: streamUrl 
+            url: streamUrl ,
+            hasAudio: false
           }, { 
             enableWorker: false, 
             enableStashBuffer: true, 
