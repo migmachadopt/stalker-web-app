@@ -229,7 +229,9 @@
       const getFilteredGroups = () => { if (!searchTerm) return groups; const term = searchTerm.toLowerCase(); return groups.filter(g => g.name.toLowerCase().includes(term)); };
 
       const playChannel = async (channel) => {
-        addLog(`🔄 Playing: ${channel.name}`); setCurrentChannel(channel);
+        addLog(`🔄 Playing: ${channel.name}`);
+        addLog(`📋 CMD: ${channel.cmd}`);
+        setCurrentChannel(channel);
         try {
           const data = await api.fetch('/iptv/stream', { method: 'POST', body: JSON.stringify({ sessionId: iptvSessionId, channelId: channel.id, cmd: channel.cmd }) });
           if (data.success && data.streamUrl) { addLog(`✅ Stream URL received`); loadStream(data.streamUrl); } else { addLog(`❌ Failed to get stream`); }
