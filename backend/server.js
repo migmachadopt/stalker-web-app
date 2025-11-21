@@ -876,6 +876,8 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
     });
 
     let streamUrl = response.data?.js?.cmd || response.data?.js || '';
+
+    console.log('Stream response:', JSON.stringify(response.data));
     
     if (typeof streamUrl === 'string') {
       streamUrl = streamUrl
