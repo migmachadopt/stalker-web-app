@@ -248,9 +248,12 @@
           }, { 
             enableWorker: false, 
             enableStashBuffer: true, 
-            stashInitialSize: 128 * 1024, 
+            stashInitialSize: 512 * 1024,
             autoCleanupSourceBuffer: true, 
-            fixAudioTimestampGap: true 
+            fixAudioTimestampGap: true,
+            liveBufferLatencyChasing: true,
+            liveBufferLatencyMaxLatency: 1.5,
+            liveBufferLatencyMinRemain: 0.3
           });
           
           player.attachMediaElement(video); 
