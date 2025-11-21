@@ -347,3 +347,4 @@ Se tiveres problemas:
 2. Verifica os logs no Raspberry Pi
 3. Confirma que os secrets estão corretos
 4. Verifica conectividade de rede
+
