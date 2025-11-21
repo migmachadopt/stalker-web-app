@@ -84,10 +84,10 @@ jobs:
           echo "📦 Copiando backend..."
           # Preservar .env e data se existirem
           if [ -f "${{ env.APP_DIR }}/.env" ]; then
-            cp ${{ env.APP_DIR }}/.env /tmp/.env.backup
+            sudo cp ${{ env.APP_DIR }}/.env /tmp/.env.backup
           fi
           if [ -d "${{ env.APP_DIR }}/backend/data" ]; then
-            cp -r ${{ env.APP_DIR }}/backend/data /tmp/data.backup
+            sudo cp -r ${{ env.APP_DIR }}/backend/data /tmp/data.backup
           fi
           
           # Copiar novos ficheiros
@@ -99,11 +99,14 @@ jobs:
           
           # Restaurar ficheiros preservados
           if [ -f "/tmp/.env.backup" ]; then
-            cp /tmp/.env.backup ${{ env.APP_DIR }}/.env
+            sudo cp /tmp/.env.backup ${{ env.APP_DIR }}/.env
           fi
           if [ -d "/tmp/data.backup" ]; then
-            cp -r /tmp/data.backup/* ${{ env.APP_DIR }}/backend/data/ 2>/dev/null || true
+            sudo cp -r /tmp/data.backup/* ${{ env.APP_DIR }}/backend/data/ 2>/dev/null || true
           fi
+          
+          # Corrigir permissões
+          sudo chown -R iptv:iptv ${{ env.APP_DIR }}
 
       - name: 📤 Copiar Frontend
         run: |
