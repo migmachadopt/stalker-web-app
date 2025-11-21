@@ -206,8 +206,8 @@ jobs:
       - name: 🧹 Limpar cache
         run: |
           # Limpar ficheiros temporários
-          rm -f /tmp/.env.backup
-          rm -rf /tmp/data.backup
+          sudo rm -f /tmp/.env.backup
+          sudo rm -rf /tmp/data.backup
           
           # Limpar cache do npm se ficar muito grande
           npm cache clean --force 2>/dev/null || true
