@@ -901,7 +901,81 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
   }
 });
 
-// Proxy endpoint
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔄 PROXY ENDPOINT - CORRIGIDO PARA SEGUIR REDIRECTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Função auxiliar para resolver redirects manualmente
+async function resolveRedirects(url, headers, maxRedirects = 10) {
+  let currentUrl = url;
+  let redirectCount = 0;
+  
+  while (redirectCount < maxRedirects) {
+    try {
+      const response = await axios.get(currentUrl, {
+        headers: headers,
+        maxRedirects: 0,  // Não seguir automaticamente
+        validateStatus: (status) => status >= 200 && status < 400,
+        timeout: 10000,
+      });
+      
+      // Se não for redirect, retorna o URL final
+      if (response.status >= 200 && response.status < 300) {
+        return currentUrl;
+      }
+      
+      // Se for redirect, obtém o novo URL
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.location || response.headers.Location;
+        if (!location) {
+          throw new Error('Redirect sem Location header');
+        }
+        
+        // Resolver URL relativo
+        if (location.startsWith('/')) {
+          const urlObj = new URL(currentUrl);
+          currentUrl = `${urlObj.protocol}//${urlObj.host}${location}`;
+        } else if (!location.startsWith('http')) {
+          const baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/') + 1);
+          currentUrl = baseUrl + location;
+        } else {
+          currentUrl = location;
+        }
+        
+        console.log(`🔀 Redirect ${redirectCount + 1}: ${currentUrl}`);
+        redirectCount++;
+      }
+    } catch (error) {
+      // Axios lança erro em redirects quando maxRedirects: 0
+      if (error.response && error.response.status >= 300 && error.response.status < 400) {
+        const location = error.response.headers.location || error.response.headers.Location;
+        if (!location) {
+          throw new Error('Redirect sem Location header');
+        }
+        
+        // Resolver URL relativo
+        if (location.startsWith('/')) {
+          const urlObj = new URL(currentUrl);
+          currentUrl = `${urlObj.protocol}//${urlObj.host}${location}`;
+        } else if (!location.startsWith('http')) {
+          const baseUrl = currentUrl.substring(0, currentUrl.lastIndexOf('/') + 1);
+          currentUrl = baseUrl + location;
+        } else {
+          currentUrl = location;
+        }
+        
+        console.log(`🔀 Redirect ${redirectCount + 1}: ${currentUrl}`);
+        redirectCount++;
+      } else {
+        throw error;
+      }
+    }
+  }
+  
+  throw new Error(`Demasiados redirects (${maxRedirects})`);
+}
+
+// Proxy endpoint - CORRIGIDO
 app.get('/api/proxy', async (req, res) => {
   try {
     const { url } = req.query;
@@ -910,6 +984,8 @@ app.get('/api/proxy', async (req, res) => {
       return res.status(400).send('URL parameter required');
     }
 
+    console.log(`📡 Proxy request: ${url.substring(0, 80)}...`);
+
     const playerHeaders = {
       'User-Agent': 'Lavf/56.40.101',
       'Icy-MetaData': '1',
@@ -917,21 +993,36 @@ app.get('/api/proxy', async (req, res) => {
       'Connection': 'Keep-Alive',
     };
 
-    let finalUrl = url;
-    const response = await axios.get(url, {
+    // Resolver redirects manualmente primeiro
+    let finalUrl;
+    try {
+      finalUrl = await resolveRedirects(url, playerHeaders);
+      console.log(`✅ Final URL: ${finalUrl.substring(0, 80)}...`);
+    } catch (redirectError) {
+      console.error(`❌ Redirect error: ${redirectError.message}`);
+      // Se falhar a resolver redirects, tenta diretamente
+      finalUrl = url;
+    }
+
+    // Agora faz o stream do URL final
+    const response = await axios.get(finalUrl, {
       responseType: 'stream',
       timeout: 30000,
-      maxRedirects: 5,
+      maxRedirects: 5,  // Permite alguns redirects adicionais
       validateStatus: (status) => status === 200,
       headers: playerHeaders,
-      beforeRedirect: (options) => {
-        finalUrl = options.href || options.url;
-      }
+      // Importante para HTTPS
+      httpsAgent: new (require('https').Agent)({
+        rejectUnauthorized: false  // Aceita certificados self-signed
+      })
     });
 
     const contentType = response.headers['content-type'] || '';
     
+    console.log(`📦 Content-Type: ${contentType}`);
+    
     if (contentType.includes('mpegurl') || contentType.includes('m3u8') || finalUrl.includes('.m3u8')) {
+      // É um playlist HLS - precisa de processar
       let content = '';
       response.data.on('data', chunk => content += chunk);
       await new Promise((resolve, reject) => {
@@ -941,15 +1032,16 @@ app.get('/api/proxy', async (req, res) => {
 
       const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
       
+      // Reescrever URLs no playlist para passar pelo proxy
       content = content.replace(/(^[^#\n][^\n]*)/gm, (match) => {
         match = match.trim();
         if (!match || match.startsWith('#')) return match;
         
         if (match.startsWith('http')) {
-          return `http://localhost:3001/api/proxy?url=${encodeURIComponent(match)}`;
+          return `/api/proxy?url=${encodeURIComponent(match)}`;
         } else {
           const fullUrl = baseUrl + match;
-          return `http://localhost:3001/api/proxy?url=${encodeURIComponent(fullUrl)}`;
+          return `/api/proxy?url=${encodeURIComponent(fullUrl)}`;
         }
       });
 
@@ -958,16 +1050,28 @@ app.get('/api/proxy', async (req, res) => {
       res.set('Cache-Control', 'no-cache');
       return res.send(content);
     } else {
-      res.set('Content-Type', 'video/mp2t');
+      // É um stream de video direto
+      res.set('Content-Type', contentType || 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Cache-Control', 'no-cache');
       res.set('Connection', 'keep-alive');
       res.set('Transfer-Encoding', 'chunked');
-      return response.data.pipe(res);
+      
+      // Pipe do stream para a resposta
+      response.data.pipe(res);
+      
+      // Cleanup quando a conexão fechar
+      req.on('close', () => {
+        response.data.destroy();
+      });
     }
 
   } catch (error) {
     console.error('❌ Proxy Error:', error.message);
+    if (error.response) {
+      console.error(`   Status: ${error.response.status}`);
+      console.error(`   Headers: ${JSON.stringify(error.response.headers)}`);
+    }
     res.status(error.response?.status || 500).send('Proxy error: ' + error.message);
   }
 });
