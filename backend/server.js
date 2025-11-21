@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = 3001;
@@ -9,11 +11,603 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
-const sessions = new Map();
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔐 SECURITY CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════════
 
-function generateToken() {
-  return crypto.randomBytes(16).toString('hex');
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const SALT_ROUNDS = 10;
+const TOKEN_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+
+// Data file path
+const DATA_DIR = path.join(__dirname, 'data');
+const USERS_FILE = path.join(DATA_DIR, 'users.enc');
+
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔒 ENCRYPTION UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function encrypt(text) {
+  const iv = crypto.randomBytes(16);
+  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  const authTag = cipher.getAuthTag();
+  
+  return {
+    iv: iv.toString('hex'),
+    encryptedData: encrypted,
+    authTag: authTag.toString('hex')
+  };
+}
+
+function decrypt(encryptedObj) {
+  const key = crypto.scryptSync(ENCRYPTION_KEY, 'salt', 32);
+  const iv = Buffer.from(encryptedObj.iv, 'hex');
+  const authTag = Buffer.from(encryptedObj.authTag, 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  
+  decipher.setAuthTag(authTag);
+  
+  let decrypted = decipher.update(encryptedObj.encryptedData, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  
+  return decrypted;
+}
+
+// Hash password with salt
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return { salt, hash };
+}
+
+// Verify password
+function verifyPassword(password, salt, storedHash) {
+  const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(storedHash));
+}
+
+// Generate JWT-like token
+function generateAuthToken(userId, role) {
+  const payload = {
+    userId,
+    role,
+    iat: Date.now(),
+    exp: Date.now() + TOKEN_EXPIRY
+  };
+  
+  const payloadStr = JSON.stringify(payload);
+  const payloadB64 = Buffer.from(payloadStr).toString('base64url');
+  
+  const signature = crypto
+    .createHmac('sha256', JWT_SECRET)
+    .update(payloadB64)
+    .digest('base64url');
+  
+  return `${payloadB64}.${signature}`;
+}
+
+// Verify auth token
+function verifyAuthToken(token) {
+  try {
+    const [payloadB64, signature] = token.split('.');
+    
+    const expectedSignature = crypto
+      .createHmac('sha256', JWT_SECRET)
+      .update(payloadB64)
+      .digest('base64url');
+    
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
+      return null;
+    }
+    
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
+    
+    if (payload.exp < Date.now()) {
+      return null; // Token expired
+    }
+    
+    return payload;
+  } catch (error) {
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📁 USER DATA MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function loadUsers() {
+  try {
+    if (!fs.existsSync(USERS_FILE)) {
+      // Create default admin user if no users exist
+      const defaultUsers = createDefaultAdmin();
+      saveUsers(defaultUsers);
+      return defaultUsers;
+    }
+    
+    const encryptedData = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    const decrypted = decrypt(encryptedData);
+    return JSON.parse(decrypted);
+  } catch (error) {
+    console.error('Error loading users:', error.message);
+    // If decryption fails, create new default admin
+    const defaultUsers = createDefaultAdmin();
+    saveUsers(defaultUsers);
+    return defaultUsers;
+  }
+}
+
+function saveUsers(users) {
+  const encrypted = encrypt(JSON.stringify(users));
+  fs.writeFileSync(USERS_FILE, JSON.stringify(encrypted, null, 2));
+}
+
+function createDefaultAdmin() {
+  const { salt, hash } = hashPassword('admin123');
+  return {
+    users: [
+      {
+        id: crypto.randomUUID(),
+        username: 'admin',
+        passwordHash: hash,
+        passwordSalt: salt,
+        role: 'admin',
+        portalUrl: '',
+        macAddress: '',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lastLogin: null,
+        isActive: true
+      }
+    ]
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🛡️ MIDDLEWARE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Auth middleware
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ success: false, error: 'No token provided' });
+  }
+  
+  const token = authHeader.substring(7);
+  const payload = verifyAuthToken(token);
+  
+  if (!payload) {
+    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+  }
+  
+  req.user = payload;
+  next();
+}
+
+// Admin middleware
+function adminMiddleware(req, res, next) {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ success: false, error: 'Admin access required' });
+  }
+  next();
+}
+
+// Rate limiting (simple implementation)
+const loginAttempts = new Map();
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_TIME = 15 * 60 * 1000; // 15 minutes
+
+function rateLimitMiddleware(req, res, next) {
+  const ip = req.ip || req.connection.remoteAddress;
+  const key = `${ip}_${req.body.username || ''}`;
+  
+  const attempts = loginAttempts.get(key);
+  
+  if (attempts && attempts.count >= MAX_LOGIN_ATTEMPTS) {
+    const timePassed = Date.now() - attempts.lastAttempt;
+    if (timePassed < LOCKOUT_TIME) {
+      const remainingTime = Math.ceil((LOCKOUT_TIME - timePassed) / 60000);
+      return res.status(429).json({ 
+        success: false, 
+        error: `Too many login attempts. Try again in ${remainingTime} minutes.` 
+      });
+    } else {
+      loginAttempts.delete(key);
+    }
+  }
+  
+  next();
+}
+
+function recordLoginAttempt(ip, username, success) {
+  const key = `${ip}_${username}`;
+  
+  if (success) {
+    loginAttempts.delete(key);
+  } else {
+    const attempts = loginAttempts.get(key) || { count: 0, lastAttempt: 0 };
+    attempts.count++;
+    attempts.lastAttempt = Date.now();
+    loginAttempts.set(key, attempts);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔐 AUTH ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Login
+app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const ip = req.ip || req.connection.remoteAddress;
+    
+    if (!username || !password) {
+      return res.status(400).json({ success: false, error: 'Username and password required' });
+    }
+    
+    const data = loadUsers();
+    const user = data.users.find(u => u.username.toLowerCase() === username.toLowerCase());
+    
+    if (!user || !user.isActive) {
+      recordLoginAttempt(ip, username, false);
+      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+    }
+    
+    if (!verifyPassword(password, user.passwordSalt, user.passwordHash)) {
+      recordLoginAttempt(ip, username, false);
+      return res.status(401).json({ success: false, error: 'Invalid credentials' });
+    }
+    
+    recordLoginAttempt(ip, username, true);
+    
+    // Update last login
+    user.lastLogin = new Date().toISOString();
+    saveUsers(data);
+    
+    const token = generateAuthToken(user.id, user.role);
+    
+    console.log(`✅ User logged in: ${username} (${user.role})`);
+    
+    res.json({
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        hasPortalConfig: !!(user.portalUrl && user.macAddress)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ success: false, error: 'Login failed' });
+  }
+});
+
+// Get current user info
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  try {
+    const data = loadUsers();
+    const user = data.users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        hasPortalConfig: !!(user.portalUrl && user.macAddress),
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to get user info' });
+  }
+});
+
+// Change password
+app.post('/api/auth/change-password', authMiddleware, (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, error: 'Current and new password required' });
+    }
+    
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+    
+    const data = loadUsers();
+    const user = data.users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    if (!verifyPassword(currentPassword, user.passwordSalt, user.passwordHash)) {
+      return res.status(401).json({ success: false, error: 'Current password is incorrect' });
+    }
+    
+    const { salt, hash } = hashPassword(newPassword);
+    user.passwordHash = hash;
+    user.passwordSalt = salt;
+    user.updatedAt = new Date().toISOString();
+    
+    saveUsers(data);
+    
+    console.log(`🔐 Password changed for user: ${user.username}`);
+    
+    res.json({ success: true, message: 'Password changed successfully' });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to change password' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 👥 ADMIN - USER MANAGEMENT ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// List all users (admin only)
+app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const data = loadUsers();
+    
+    const users = data.users.map(u => ({
+      id: u.id,
+      username: u.username,
+      role: u.role,
+      hasPortalConfig: !!(u.portalUrl && u.macAddress),
+      portalUrl: u.portalUrl ? u.portalUrl.replace(/^(https?:\/\/[^\/]+).*/, '$1/***') : '', // Mask URL
+      macAddress: u.macAddress ? u.macAddress.replace(/(.{2}:.{2}:.{2}:).+/, '$1**:**:**') : '', // Mask MAC
+      isActive: u.isActive,
+      createdAt: u.createdAt,
+      lastLogin: u.lastLogin
+    }));
+    
+    res.json({ success: true, users });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to list users' });
+  }
+});
+
+// Create user (admin only)
+app.post('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const { username, password, role, portalUrl, macAddress } = req.body;
+    
+    if (!username || !password) {
+      return res.status(400).json({ success: false, error: 'Username and password required' });
+    }
+    
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+    
+    if (role && !['user', 'admin'].includes(role)) {
+      return res.status(400).json({ success: false, error: 'Invalid role. Must be "user" or "admin"' });
+    }
+    
+    const data = loadUsers();
+    
+    // Check if username already exists
+    if (data.users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
+      return res.status(400).json({ success: false, error: 'Username already exists' });
+    }
+    
+    const { salt, hash } = hashPassword(password);
+    
+    const newUser = {
+      id: crypto.randomUUID(),
+      username: username.trim(),
+      passwordHash: hash,
+      passwordSalt: salt,
+      role: role || 'user',
+      portalUrl: portalUrl || '',
+      macAddress: macAddress || '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastLogin: null,
+      isActive: true
+    };
+    
+    data.users.push(newUser);
+    saveUsers(data);
+    
+    console.log(`👤 New user created: ${username} (${newUser.role})`);
+    
+    res.json({
+      success: true,
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        role: newUser.role,
+        hasPortalConfig: !!(newUser.portalUrl && newUser.macAddress)
+      }
+    });
+    
+  } catch (error) {
+    console.error('Create user error:', error);
+    res.status(500).json({ success: false, error: 'Failed to create user' });
+  }
+});
+
+// Update user (admin only)
+app.put('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const { id } = req.params;
+    const { username, password, role, portalUrl, macAddress, isActive } = req.body;
+    
+    const data = loadUsers();
+    const userIndex = data.users.findIndex(u => u.id === id);
+    
+    if (userIndex === -1) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    const user = data.users[userIndex];
+    
+    // Prevent disabling the last admin
+    if (user.role === 'admin' && isActive === false) {
+      const activeAdmins = data.users.filter(u => u.role === 'admin' && u.isActive && u.id !== id);
+      if (activeAdmins.length === 0) {
+        return res.status(400).json({ success: false, error: 'Cannot disable the last admin' });
+      }
+    }
+    
+    // Update fields
+    if (username && username !== user.username) {
+      if (data.users.some(u => u.id !== id && u.username.toLowerCase() === username.toLowerCase())) {
+        return res.status(400).json({ success: false, error: 'Username already exists' });
+      }
+      user.username = username.trim();
+    }
+    
+    if (password) {
+      if (password.length < 6) {
+        return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+      }
+      const { salt, hash } = hashPassword(password);
+      user.passwordHash = hash;
+      user.passwordSalt = salt;
+    }
+    
+    if (role && ['user', 'admin'].includes(role)) {
+      user.role = role;
+    }
+    
+    if (portalUrl !== undefined) {
+      user.portalUrl = portalUrl;
+    }
+    
+    if (macAddress !== undefined) {
+      user.macAddress = macAddress;
+    }
+    
+    if (isActive !== undefined) {
+      user.isActive = isActive;
+    }
+    
+    user.updatedAt = new Date().toISOString();
+    saveUsers(data);
+    
+    console.log(`✏️ User updated: ${user.username}`);
+    
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        hasPortalConfig: !!(user.portalUrl && user.macAddress),
+        isActive: user.isActive
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to update user' });
+  }
+});
+
+// Delete user (admin only)
+app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const data = loadUsers();
+    const userIndex = data.users.findIndex(u => u.id === id);
+    
+    if (userIndex === -1) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    const user = data.users[userIndex];
+    
+    // Prevent deleting the last admin
+    if (user.role === 'admin') {
+      const admins = data.users.filter(u => u.role === 'admin');
+      if (admins.length <= 1) {
+        return res.status(400).json({ success: false, error: 'Cannot delete the last admin' });
+      }
+    }
+    
+    // Prevent self-deletion
+    if (id === req.user.userId) {
+      return res.status(400).json({ success: false, error: 'Cannot delete your own account' });
+    }
+    
+    data.users.splice(userIndex, 1);
+    saveUsers(data);
+    
+    console.log(`🗑️ User deleted: ${user.username}`);
+    
+    res.json({ success: true, message: 'User deleted successfully' });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to delete user' });
+  }
+});
+
+// Get user full details (admin only - for editing)
+app.get('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const data = loadUsers();
+    const user = data.users.find(u => u.id === id);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        portalUrl: user.portalUrl,
+        macAddress: user.macAddress,
+        isActive: user.isActive,
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt,
+        lastLogin: user.lastLogin
+      }
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to get user details' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📺 IPTV ENDPOINTS (Updated to use user's portal config)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const stalkerSessions = new Map();
 
 function getStalkerHeaders(token = '', macAddress = '') {
   const headers = {
@@ -29,8 +623,7 @@ function getStalkerHeaders(token = '', macAddress = '') {
   }
 
   if (macAddress) {
-    // Gerar um serial number único baseado no MAC
-    const sn = '93200916082029478'; // Pode ser fixo ou gerado
+    const sn = '93200916082029478';
     headers['Cookie'] = `PHPSESSID=null; sn=${sn}; mac=${macAddress}; timezone=Europe/Lisbon; stb_lang=en`;
   }
 
@@ -49,7 +642,6 @@ async function discoverPortalPath(baseUrl, macAddress) {
     '',
   ];
 
-  // Primeiro tentar paths comuns
   for (const path of possiblePaths) {
     const testUrl = `${baseUrl}${path}?type=stb&action=handshake&token=&JsHttpRequest=1-xml`;
     
@@ -77,92 +669,40 @@ async function discoverPortalPath(baseUrl, macAddress) {
     }
   }
 
-  // Se não encontrou, tentar descobrir path com hash (ex: /rbyo067ta9ov/portal.php)
-  console.log(`   🔍 Trying to discover hashed path...`);
-  try {
-    // Fazer request à raiz e procurar por redirects ou hints
-    const rootResponse = await axios.get(baseUrl, {
-      headers: getStalkerHeaders('', macAddress),
-      timeout: 10000,
-      maxRedirects: 0,
-      validateStatus: () => true,
-    });
-
-    // Verificar se há redirect com path
-    const location = rootResponse.headers.location || rootResponse.headers.Location;
-    if (location && location.includes('portal.php')) {
-      const match = location.match(/\/([^\/]+\/portal\.php)/);
-      if (match) {
-        const discoveredPath = '/' + match[1];
-        console.log(`   🔍 Discovered hashed path: ${discoveredPath}`);
-        
-        const testUrl = `${baseUrl}${discoveredPath}?type=stb&action=handshake&token=&JsHttpRequest=1-xml`;
-        const testResponse = await axios.get(testUrl, {
-          headers: getStalkerHeaders('', macAddress),
-          timeout: 10000,
-        });
-
-        if (testResponse.data && testResponse.data.js && testResponse.data.js.token) {
-          console.log(`   ✅ Hashed path works!`);
-          return {
-            path: discoveredPath,
-            fullUrl: `${baseUrl}${discoveredPath}`,
-            token: testResponse.data.js.token,
-            response: testResponse.data
-          };
-        }
-      }
-    }
-  } catch (error) {
-    console.log(`   ⚠️  Could not discover hashed path: ${error.message}`);
-  }
-
   return null;
 }
 
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Backend is running!',
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.post('/api/handshake', async (req, res) => {
+// Connect to IPTV (uses user's stored portal config)
+app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
   try {
-    let { portalUrl, macAddress } = req.body;
+    const data = loadUsers();
+    const user = data.users.find(u => u.id === req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    if (!user.portalUrl || !user.macAddress) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Portal URL and MAC address not configured. Contact admin.' 
+      });
+    }
 
     console.log('\n╔════════════════════════════════════════════════════════╗');
-    console.log('║            NEW HANDSHAKE REQUEST                       ║');
+    console.log('║            IPTV CONNECTION REQUEST                     ║');
     console.log('╚════════════════════════════════════════════════════════╝');
-    console.log(`📍 Base URL (input): ${portalUrl}`);
-    console.log(`🔑 MAC Address: ${macAddress}`);
+    console.log(`👤 User: ${user.username}`);
+    console.log(`📍 Portal: ${user.portalUrl}`);
 
-    if (!portalUrl || !macAddress) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Portal URL and MAC address are required' 
-      });
-    }
-
-    const macRegex = /^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$/;
-    if (!macRegex.test(macAddress)) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Invalid MAC address format' 
-      });
-    }
-
-    let baseUrl = portalUrl
+    let baseUrl = user.portalUrl
       .replace(/\/$/, '')
       .replace(/\/portal\.php.*$/, '')
       .replace(/\/stalker_portal.*$/, '')
       .replace(/\/server.*$/, '')
       .replace(/\/c\/?$/, '');
 
-    console.log(`🧹 Cleaned base URL: ${baseUrl}`);
-
-    console.log('\n🔄 Checking for redirects...');
+    // Check for redirects
     try {
       const checkRedirect = await axios.get(baseUrl, {
         maxRedirects: 0,
@@ -174,7 +714,6 @@ app.post('/api/handshake', async (req, res) => {
         const redirectUrl = checkRedirect.headers.location || checkRedirect.headers.Location;
         if (redirectUrl) {
           baseUrl = redirectUrl.replace(/\/$/, '');
-          console.log(`🔄 Redirect: ${portalUrl} → ${baseUrl}`);
         }
       }
     } catch (error) {
@@ -182,280 +721,115 @@ app.post('/api/handshake', async (req, res) => {
         const redirectUrl = error.response.headers.location || error.response.headers.Location;
         if (redirectUrl) {
           baseUrl = redirectUrl.replace(/\/$/, '');
-          console.log(`🔄 Redirect: ${portalUrl} → ${baseUrl}`);
         }
       }
     }
 
-    console.log(`✅ Final base URL: ${baseUrl}`);
-
-    const discovery = await discoverPortalPath(baseUrl, macAddress);
+    const discovery = await discoverPortalPath(baseUrl, user.macAddress);
 
     if (!discovery) {
       return res.status(500).json({
         success: false,
-        error: 'Could not find working portal endpoint',
-        suggestions: [
-          'Verify the base URL is correct',
-          'Check if your MAC address is registered',
-          'Contact your IPTV provider'
-        ]
+        error: 'Could not connect to IPTV portal'
       });
     }
 
-    const fullPortalUrl = discovery.fullUrl;
-    const token = discovery.token;
-
-    console.log(`✅ Portal: ${discovery.path || '(root)'}`);
-    console.log(`✅ Token: ${token.substring(0, 30)}...`);
-
-    const sessionId = generateToken();
-    sessions.set(sessionId, {
+    const sessionId = crypto.randomBytes(16).toString('hex');
+    stalkerSessions.set(sessionId, {
       baseUrl: baseUrl,
-      portalUrl: fullPortalUrl,
+      portalUrl: discovery.fullUrl,
       portalPath: discovery.path,
-      macAddress,
-      token,
+      macAddress: user.macAddress,
+      token: discovery.token,
+      userId: user.id,
       createdAt: Date.now(),
     });
 
-    console.log(`💾 Session: ${sessionId.substring(0, 20)}...`);
-    
-    // 🆕 Buscar géneros/categorias - tentar vários endpoints
-    console.log(`🔄 Fetching channel genres...`);
-    let genres = [];
-    
-    const genreEndpoints = [
-      `${fullPortalUrl}?type=itv&action=get_genres&JsHttpRequest=1-xml`,
-      `${fullPortalUrl}?type=itv&action=get_all_genres&JsHttpRequest=1-xml`,
-      `${fullPortalUrl}?type=stb&action=get_genres&JsHttpRequest=1-xml`,
-    ];
-    
-    for (const genresUrl of genreEndpoints) {
-      try {
-        console.log(`   🧪 Trying: ${genresUrl.split('?')[1]?.substring(0, 50)}...`);
-        const genresResponse = await axios.get(genresUrl, {
-          headers: getStalkerHeaders(token, macAddress),
-          timeout: 10000,
-        });
-        
-        const genresData = genresResponse.data?.js;
-        
-        // Debug: ver estrutura da resposta
-        console.log(`   📋 Response type: ${typeof genresData}, isArray: ${Array.isArray(genresData)}`);
-        
-        if (Array.isArray(genresData) && genresData.length > 0) {
-          genres = genresData;
-          console.log(`   ✅ Found ${genres.length} genres!`);
-          break;
-        } else if (genresData && typeof genresData === 'object' && !Array.isArray(genresData) && genresData !== true) {
-          // Pode ser objeto com dados
-          if (genresData.data && Array.isArray(genresData.data)) {
-            genres = genresData.data;
-            console.log(`   ✅ Found ${genres.length} genres in .data!`);
-            break;
-          }
-          // Tentar converter objeto para array
-          const values = Object.values(genresData);
-          if (values.length > 0 && typeof values[0] === 'object') {
-            genres = values;
-            console.log(`   ✅ Found ${genres.length} genres from object values!`);
-            break;
-          }
-        }
-      } catch (error) {
-        console.log(`   ❌ Failed: ${error.message}`);
-      }
-    }
-    
-    if (genres.length > 0) {
-      console.log(`📋 Genres found:`);
-      genres.slice(0, 20).forEach(g => {
-        const id = g?.id || g?.genre_id || g?.gid;
-        const title = g?.title || g?.name || g?.genre_name;
-        if (id && title) console.log(`   - ${id}: ${title}`);
-      });
-    } else {
-      console.log(`⚠️ No genres found - will extract from channels later`);
-    }
-    
-    // Guardar na sessão
-    sessions.get(sessionId).genres = genres;
-    
-    console.log('✅ AUTHENTICATION SUCCESSFUL!\n');
+    console.log(`✅ IPTV Connected for user: ${user.username}`);
 
     res.json({
       success: true,
       sessionId,
-      message: 'Successfully connected!',
-      portalInfo: {
-        baseUrl: baseUrl,
-        fullUrl: fullPortalUrl,
-        detectedPath: discovery.path || '(root)'
-      },
-      genres: Array.isArray(genres) ? genres.map(g => ({
-        id: g?.id || g?.genre_id,
-        title: g?.title || g?.name || 'Unknown',
-        alias: g?.alias || '',
-      })) : []
+      message: 'Connected to IPTV!'
     });
 
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('❌ IPTV Connection Error:', error.message);
     res.status(500).json({
       success: false,
-      error: 'Unexpected Error',
-      details: error.message
+      error: 'Failed to connect to IPTV'
     });
   }
 });
 
-// 🆕 Get channel genres/groups
-app.post('/api/genres', async (req, res) => {
+// Get channels
+app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body;
 
-    if (!sessionId || !sessions.has(sessionId)) {
-      return res.status(401).json({ success: false, error: 'Invalid session' });
+    if (!sessionId || !stalkerSessions.has(sessionId)) {
+      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
     }
 
-    const session = sessions.get(sessionId);
+    const session = stalkerSessions.get(sessionId);
     
-    console.log(`🔄 Fetching channel genres/groups...`);
-    
-    const genresUrl = `${session.portalUrl}?type=itv&action=get_genres&JsHttpRequest=1-xml`;
-    
-    const response = await axios.get(genresUrl, {
-      headers: getStalkerHeaders(session.token, session.macAddress),
-      timeout: 30000,
-      maxRedirects: 5,
-    });
-
-    const genres = response.data?.js || [];
-    
-    console.log(`📋 Genres response:`);
-    console.log(JSON.stringify(genres, null, 2));
-    
-    res.json({
-      success: true,
-      genres: genres
-    });
-
-  } catch (error) {
-    console.error('❌ Genres Error:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch genres',
-      details: error.message 
-    });
-  }
-});
-
-app.post('/api/channels', async (req, res) => {
-  try {
-    const { sessionId } = req.body;
-
-    if (!sessionId || !sessions.has(sessionId)) {
-      return res.status(401).json({ success: false, error: 'Invalid session' });
+    // Verify session belongs to user
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
     }
-
-    const session = sessions.get(sessionId);
     
-    // ⭐ STEP 1: Get Profile (CRITICAL!)
-    console.log(`🔄 Step 1: Getting profile...`);
+    // Get Profile first
+    console.log(`🔄 Getting profile...`);
     const profileUrl = `${session.portalUrl}?type=stb&action=get_profile&JsHttpRequest=1-xml`;
     
-    const profileResponse = await axios.get(profileUrl, {
+    await axios.get(profileUrl, {
       headers: getStalkerHeaders(session.token, session.macAddress),
       timeout: 15000,
-      maxRedirects: 5,
     });
     
-    const profileId = profileResponse.data?.js?.id;
-    console.log(`✅ Profile ID: ${profileId}`);
-    
-    // ⭐ STEP 2: Get ALL channels with pagination
-    console.log(`🔄 Step 2: Getting channels...`);
-    
+    // Get channels with pagination
     let allChannels = [];
     let page = 1;
     let totalItems = 0;
     let hasMorePages = true;
     
-    // Buscar primeira página para saber o total
     const firstPageUrl = `${session.portalUrl}?type=itv&action=get_ordered_list&genre=*&force_ch_link_check=&fav=0&sortby=number&hd=0&p=${page}&JsHttpRequest=1-xml`;
     
     const firstResponse = await axios.get(firstPageUrl, {
       headers: getStalkerHeaders(session.token, session.macAddress),
       timeout: 30000,
-      maxRedirects: 5,
     });
     
     totalItems = firstResponse.data?.js?.total_items || 0;
-    const firstPageChannels = firstResponse.data?.js?.data || [];
-    allChannels = firstPageChannels;
+    allChannels = firstResponse.data?.js?.data || [];
     
     console.log(`📊 Total available: ${totalItems}, got ${allChannels.length} on page 1`);
     
-    // Log estrutura completa do primeiro canal para debug
-    if (firstPageChannels.length > 0) {
-      console.log(`\n📋 ═══════════════════════════════════════════════════════`);
-      console.log(`📋 ESTRUTURA COMPLETA DO PRIMEIRO CANAL:`);
-      console.log(`📋 ═══════════════════════════════════════════════════════`);
-      console.log(JSON.stringify(firstPageChannels[0], null, 2));
-      console.log(`\n📋 CAMPOS DISPONÍVEIS: ${Object.keys(firstPageChannels[0]).join(', ')}`);
-      console.log(`📋 ═══════════════════════════════════════════════════════\n`);
-    }
-    
-    // Log estrutura da resposta completa
-    const responseKeys = Object.keys(firstResponse.data?.js || {});
-    console.log(`📋 Response keys: ${responseKeys.join(', ')}`);
-    
-    // Continuar buscando enquanto houver canais E não tivermos todos
+    // Fetch remaining pages
     page = 2;
-    const maxPages = 100; // Aumentado para suportar mais canais (100 * 14 = 1400)
-    
-    while (hasMorePages && allChannels.length < totalItems && page <= maxPages) {
-      console.log(`📄 Fetching page ${page}... (current: ${allChannels.length}/${totalItems})`);
-      
+    while (hasMorePages && allChannels.length < totalItems && page <= 100) {
       const pageUrl = `${session.portalUrl}?type=itv&action=get_ordered_list&genre=*&force_ch_link_check=&fav=0&sortby=number&hd=0&p=${page}&JsHttpRequest=1-xml`;
       
       try {
         const pageResponse = await axios.get(pageUrl, {
           headers: getStalkerHeaders(session.token, session.macAddress),
           timeout: 30000,
-          maxRedirects: 5,
         });
         
         const pageChannels = pageResponse.data?.js?.data || [];
         
         if (pageChannels.length === 0) {
-          console.log(`   ⚠️  No more channels on page ${page}, stopping`);
           hasMorePages = false;
         } else {
           allChannels = allChannels.concat(pageChannels);
-          console.log(`   ✅ Page ${page}: +${pageChannels.length} channels (total: ${allChannels.length}/${totalItems})`);
           page++;
         }
       } catch (error) {
-        console.error(`   ❌ Error on page ${page}:`, error.message);
         hasMorePages = false;
       }
     }
     
-    console.log(`✅ Total channels loaded: ${allChannels.length} / ${totalItems}`);
-
-    // 🆕 Extrair géneros únicos dos canais
-    const genreIds = [...new Set(allChannels.map(ch => ch.tv_genre_id).filter(id => id !== undefined && id !== null))];
-    console.log(`📋 Unique genre IDs found: ${genreIds.join(', ')}`);
-    
-    // Contar canais por género
-    const genreCounts = {};
-    allChannels.forEach(ch => {
-      const gid = ch.tv_genre_id || 'unknown';
-      genreCounts[gid] = (genreCounts[gid] || 0) + 1;
-    });
-    console.log(`📋 Channels per genre:`, genreCounts);
+    console.log(`✅ Total channels loaded: ${allChannels.length}`);
 
     res.json({
       success: true,
@@ -470,57 +844,46 @@ app.post('/api/channels', async (req, res) => {
         tv_genre_id: ch.tv_genre_id,
         genres_str: ch.genres_str || '',
         hd: ch.hd === "1" || ch.hd === 1,
-        archive: ch.archive === 1 || ch.enable_tv_archive === 1,
-        archive_duration: ch.tv_archive_duration || 0,
       }))
     });
 
   } catch (error) {
     console.error('❌ Channels Error:', error.message);
-    console.error('Full error:', error.response?.data || error);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to fetch channels',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to fetch channels' });
   }
 });
 
-app.post('/api/stream', async (req, res) => {
+// Get stream URL
+app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
   try {
     const { sessionId, channelId, cmd } = req.body;
 
-    if (!sessionId || !sessions.has(sessionId)) {
-      return res.status(401).json({ success: false, error: 'Invalid session' });
+    if (!sessionId || !stalkerSessions.has(sessionId)) {
+      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
     }
 
-    const session = sessions.get(sessionId);
+    const session = stalkerSessions.get(sessionId);
+    
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
+    }
+    
     const createLinkUrl = `${session.portalUrl}?type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&JsHttpRequest=1-xml`;
-
-    console.log(`🔄 Creating stream link for channel ${channelId}...`);
 
     const response = await axios.get(createLinkUrl, {
       headers: getStalkerHeaders(session.token, session.macAddress),
       timeout: 15000,
-      maxRedirects: 5,
     });
 
     let streamUrl = response.data?.js?.cmd || response.data?.js || '';
     
-    // 🧹 Limpar prefixos indesejados (ffmpeg, etc)
     if (typeof streamUrl === 'string') {
       streamUrl = streamUrl
         .replace(/^ffmpeg\s+/i, '')
         .replace(/^ffmpeg:/i, '')
-        .replace(/^ffprobe\s+/i, '')
-        .replace(/^vlc\s+/i, '')
         .trim();
     }
     
-    console.log(`✅ Stream URL: ${streamUrl.substring(0, 100)}...`);
-
-    // 🔄 NÃO converter .ts para .m3u8!
-    // O servidor faz redirect 302 automaticamente
     const proxyUrl = `http://localhost:3001/api/proxy?url=${encodeURIComponent(streamUrl)}`;
 
     res.json({
@@ -532,15 +895,11 @@ app.post('/api/stream', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Stream Error:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: 'Failed to get stream',
-      details: error.message 
-    });
+    res.status(500).json({ success: false, error: 'Failed to get stream' });
   }
 });
 
-// 🆕 Proxy endpoint para contornar CORS
+// Proxy endpoint
 app.get('/api/proxy', async (req, res) => {
   try {
     const { url } = req.query;
@@ -549,9 +908,6 @@ app.get('/api/proxy', async (req, res) => {
       return res.status(400).send('URL parameter required');
     }
 
-    console.log(`🔄 Proxying: ${url.substring(0, 100)}...`);
-
-    // Headers para simular player real (FFmpeg/Lavf)
     const playerHeaders = {
       'User-Agent': 'Lavf/56.40.101',
       'Icy-MetaData': '1',
@@ -559,118 +915,91 @@ app.get('/api/proxy', async (req, res) => {
       'Connection': 'Keep-Alive',
     };
 
-    try {
-      console.log(`   🧪 Trying original URL (will follow 302 redirects)...`);
+    let finalUrl = url;
+    const response = await axios.get(url, {
+      responseType: 'stream',
+      timeout: 30000,
+      maxRedirects: 5,
+      validateStatus: (status) => status === 200,
+      headers: playerHeaders,
+      beforeRedirect: (options) => {
+        finalUrl = options.href || options.url;
+      }
+    });
 
-      // Configurar axios para capturar URL final após redirects
-      let finalUrl = url;
-      const axiosConfig = {
-        responseType: 'stream',
-        timeout: 30000,
-        maxRedirects: 5,
-        validateStatus: (status) => status === 200,
-        headers: playerHeaders,
-        beforeRedirect: (options, responseDetails) => {
-          // Capturar URL final após redirect
-          finalUrl = options.href || options.url;
-          console.log(`   🔄 Redirected to: ${finalUrl.substring(0, 100)}...`);
-        }
-      };
-
-      const response = await axios.get(url, axiosConfig);
-
-      console.log(`   ✅ Success! Final URL: ${finalUrl.substring(0, 100)}...`);
-      console.log(`   📋 Response Headers:`, {
-        'content-type': response.headers['content-type'],
-        'content-length': response.headers['content-length'],
-        'location': response.headers['location']
+    const contentType = response.headers['content-type'] || '';
+    
+    if (contentType.includes('mpegurl') || contentType.includes('m3u8') || finalUrl.includes('.m3u8')) {
+      let content = '';
+      response.data.on('data', chunk => content += chunk);
+      await new Promise((resolve, reject) => {
+        response.data.on('end', resolve);
+        response.data.on('error', reject);
       });
+
+      const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
       
-      // Verificar se é m3u8
-      const contentType = response.headers['content-type'] || '';
-      
-      if (contentType.includes('mpegurl') || contentType.includes('m3u8') || finalUrl.includes('.m3u8')) {
-        console.log(`   📋 It's an M3U8 playlist, processing...`);
+      content = content.replace(/(^[^#\n][^\n]*)/gm, (match) => {
+        match = match.trim();
+        if (!match || match.startsWith('#')) return match;
         
-        // Ler todo o conteúdo
-        let content = '';
-        response.data.on('data', chunk => content += chunk);
-        await new Promise((resolve, reject) => {
-          response.data.on('end', resolve);
-          response.data.on('error', reject);
-        });
+        if (match.startsWith('http')) {
+          return `http://localhost:3001/api/proxy?url=${encodeURIComponent(match)}`;
+        } else {
+          const fullUrl = baseUrl + match;
+          return `http://localhost:3001/api/proxy?url=${encodeURIComponent(fullUrl)}`;
+        }
+      });
 
-        // Usar finalUrl (após redirect) como base
-        const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
-        
-        content = content.replace(/(^[^#\n][^\n]*)/gm, (match) => {
-          match = match.trim();
-          if (!match || match.startsWith('#')) return match;
-          
-          if (match.startsWith('http')) {
-            return `http://localhost:3001/api/proxy?url=${encodeURIComponent(match)}`;
-          } else {
-            const fullUrl = baseUrl + match;
-            return `http://localhost:3001/api/proxy?url=${encodeURIComponent(fullUrl)}`;
-          }
-        });
-
-        res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Headers', '*');
-        res.set('Cache-Control', 'no-cache'); // Não cachear playlists
-        return res.send(content);
-      } else {
-        // ⭐ Stream MPEG-TS contínuo - fazer pipe direto
-        console.log(`   🎬 Streaming MPEG-TS data directly...`);
-        res.set('Content-Type', 'video/mp2t');
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Headers', '*');
-        res.set('Cache-Control', 'no-cache');
-        res.set('Connection', 'keep-alive');
-        res.set('Transfer-Encoding', 'chunked');
-        return response.data.pipe(res);
-      }
-
-    } catch (error) {
-      console.error(`   ❌ Failed: ${error.message}`);
-      
-      // Se o URL original falhou com 404, pode ser que o token expirou
-      if (error.response?.status === 404) {
-        console.error(`   ⚠️  Token may have expired (404). Original URL no longer valid.`);
-      }
-      
-      throw error;
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Cache-Control', 'no-cache');
+      return res.send(content);
+    } else {
+      res.set('Content-Type', 'video/mp2t');
+      res.set('Access-Control-Allow-Origin', '*');
+      res.set('Cache-Control', 'no-cache');
+      res.set('Connection', 'keep-alive');
+      res.set('Transfer-Encoding', 'chunked');
+      return response.data.pipe(res);
     }
 
   } catch (error) {
     console.error('❌ Proxy Error:', error.message);
-    console.error('   This usually means the play_token expired or is single-use only.');
     res.status(error.response?.status || 500).send('Proxy error: ' + error.message);
   }
 });
 
-// Cleanup de sessões antigas (1 hora)
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Backend is running!',
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Cleanup old sessions
 setInterval(() => {
   const now = Date.now();
   const oneHour = 60 * 60 * 1000;
   
-  for (const [sessionId, session] of sessions.entries()) {
+  for (const [sessionId, session] of stalkerSessions.entries()) {
     if (now - session.createdAt > oneHour) {
-      sessions.delete(sessionId);
-      console.log(`🧹 Cleaned expired session: ${sessionId.substring(0, 20)}...`);
+      stalkerSessions.delete(sessionId);
+      console.log(`🧹 Cleaned expired IPTV session`);
     }
   }
 }, 5 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log('║    🚀 Stalker IPTV Backend - FIXED VERSION 🚀        ║');
+  console.log('║    🚀 Stalker IPTV Backend - WITH AUTH 🔐            ║');
   console.log('╚═══════════════════════════════════════════════════════╝');
   console.log(`\n📡 Server: http://localhost:${PORT}`);
   console.log(`✅ Health: http://localhost:${PORT}/api/health`);
-  console.log(`\n✨ Features:`);
-  console.log(`   • Auto-discovers portal endpoints`);
-  console.log(`   • Calls get_profile before fetching channels (FIXED!)`);
-  console.log(`   • Supports 1000+ channels\n`);
+  console.log(`\n🔐 Default admin credentials:`);
+  console.log(`   Username: admin`);
+  console.log(`   Password: admin123`);
+  console.log(`\n⚠️  IMPORTANT: Change the admin password after first login!\n`);
 });
