@@ -255,6 +255,14 @@
           
           player.attachMediaElement(video); 
           player.load();
+
+          const playTimeout = setTimeout(() => {
+            addLog(`⚠️ Timeout: stream não começou após 10s`);
+            addLog(`   readyState: ${video.readyState}`);
+            addLog(`   networkState: ${video.networkState}`);
+          }, 10000);
+
+
           
           // Logging detalhado - player events
           player.on(mpegts.Events.ERROR, (type, detail, info) => {
@@ -296,7 +304,8 @@
           video.onwaiting = () => addLog(`⏳ Video waiting for data...`);
           
           let hasPlayed = false; video.muted = false; video.volume = 1.0;
-          video.oncanplay = () => { 
+          video.oncanplay = () => {
+            clearTimeout(playTimeout); 
             addLog(`✅ Video can play`);
             if (!hasPlayed) { 
               video.play().then(() => hasPlayed = true).catch(() => { 
