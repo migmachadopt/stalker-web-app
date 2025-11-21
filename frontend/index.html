@@ -239,11 +239,47 @@
       const loadStream = (streamUrl) => {
         const video = videoRef.current; if (!video) return;
         if (playerRef.current) { playerRef.current.destroy?.(); playerRef.current = null; }
+        
         if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
-          const player = mpegts.createPlayer({ type: 'mpegts', isLive: true, url: streamUrl }, { enableWorker: false, enableStashBuffer: true, stashInitialSize: 128 * 1024, autoCleanupSourceBuffer: true, fixAudioTimestampGap: true });
-          player.attachMediaElement(video); player.load();
-          player.on(mpegts.Events.ERROR, (type, detail) => addLog(`❌ mpegts ERROR: ${type} - ${detail}`));
-          player.on(mpegts.Events.MEDIA_INFO, (info) => addLog(`📊 ${info.videoCodec}, ${info.width}x${info.height}`));
+          const player = mpegts.createPlayer({ 
+            type: 'mpegts', 
+            isLive: true, 
+            url: streamUrl 
+          }, { 
+            enableWorker: false, 
+            enableStashBuffer: true, 
+            stashInitialSize: 128 * 1024, 
+            autoCleanupSourceBuffer: true, 
+            fixAudioTimestampGap: true 
+          });
+          
+          player.attachMediaElement(video); 
+          player.load();
+          
+          // Logging detalhado
+          player.on(mpegts.Events.ERROR, (type, detail, info) => {
+            addLog(`❌ ERROR: ${type} - ${detail}`);
+            if (info) addLog(`   Info: ${JSON.stringify(info)}`);
+          });
+          
+          player.on(mpegts.Events.MEDIA_INFO, (info) => {
+            addLog(`📊 Video: ${info.videoCodec || 'unknown'}, ${info.width}x${info.height}`);
+            addLog(`📊 Audio: ${info.audioCodec || 'unknown'}, ${info.audioSampleRate}Hz`);
+            
+            // Detectar H.265
+            if (info.videoCodec && info.videoCodec.toLowerCase().includes('hevc')) {
+              addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
+            }
+            if (info.videoCodec && info.videoCodec.toLowerCase().includes('hev')) {
+              addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
+            }
+          });
+          
+          player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+            if (stats.decodedFrames === 0 && stats.droppedFrames > 0) {
+              addLog(`⚠️ Frames dropped: ${stats.droppedFrames} - possível codec não suportado`);
+            }
+          });
           let hasPlayed = false; video.muted = false; video.volume = 1.0;
           video.oncanplay = () => { if (!hasPlayed) { video.play().then(() => hasPlayed = true).catch(() => { video.muted = true; video.play().then(() => { hasPlayed = true; setTimeout(() => video.muted = false, 2000); }); }); } };
           video.onplaying = () => addLog('▶️ Playing!');
