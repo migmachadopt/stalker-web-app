@@ -865,8 +865,10 @@ app.get('/api/proxy', async (req, res) => {
         '-i', url,
         '-c:v', 'copy',
         '-c:a', 'aac',
+        '-ac', '2',
+        '-ar', '48000',
         '-b:a', '128k',
-        '-profile:a', 'aac_low',    // Forçar AAC-LC
+        '-bsf:a', 'aac_adtstoasc',
         '-f', 'mpegts',
         '-'
       ], {
