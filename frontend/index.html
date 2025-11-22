@@ -242,13 +242,18 @@
         const video = videoRef.current; if (!video) return;
         if (playerRef.current) { playerRef.current.destroy?.(); playerRef.current = null; }
         
+        // Converter URL relativo para absoluto
+        const absoluteUrl = streamUrl.startsWith('/') 
+          ? window.location.origin + streamUrl 
+          : streamUrl;
+        
         if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
           const player = mpegts.createPlayer({ 
             type: 'mpegts', 
             isLive: true, 
-            url: streamUrl
+            url: absoluteUrl
           }, { 
-            enableWorker: true,
+            enableWorker: false,
             enableStashBuffer: true, 
             stashInitialSize: 128 * 1024,
             autoCleanupSourceBuffer: true,
@@ -256,8 +261,6 @@
             autoCleanupMaxBackwardDuration: 60,
             fixAudioTimestampGap: true,
             accurateSeek: false,
-            seekType: 'range',
-            lazyLoadMaxDuration: 3 * 60,
             deferLoadAfterSourceOpen: false
           });
           
