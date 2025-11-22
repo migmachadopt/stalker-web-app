@@ -246,21 +246,31 @@
           const player = mpegts.createPlayer({ 
             type: 'mpegts', 
             isLive: true, 
-            url: streamUrl,
-            hasAudio: false
+            url: streamUrl
           }, { 
-            enableWorker: false, 
+            enableWorker: true,
             enableStashBuffer: true, 
-            stashInitialSize: 1024 * 1024,
-            autoCleanupSourceBuffer: true, 
+            stashInitialSize: 128 * 1024,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMinBackwardDuration: 30,
+            autoCleanupMaxBackwardDuration: 60,
             fixAudioTimestampGap: true,
-            liveBufferLatencyChasing: false,
-            autoCleanupMinBackwardDuration: 60,
-            autoCleanupMaxBackwardDuration: 120
+            accurateSeek: false,
+            seekType: 'range',
+            lazyLoadMaxDuration: 3 * 60,
+            deferLoadAfterSourceOpen: false
           });
           
           player.attachMediaElement(video); 
           player.load();
+          
+          // Forçar play após 2 segundos
+          setTimeout(() => {
+            if (video.readyState >= 1) {
+              addLog('⏯️ Forcing play...');
+              video.play().catch(e => addLog(`Play error: ${e.message}`));
+            }
+          }, 2000);
 
           const playTimeout = setTimeout(() => {
             addLog(`⚠️ Timeout: stream não começou após 10s`);
