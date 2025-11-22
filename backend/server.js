@@ -858,7 +858,7 @@ app.get('/api/proxy', async (req, res) => {
 
     // Se pedir transcoding, usa FFmpeg
     if (transcode === '1') {
-      console.log(`🔄 Transcoding enabled`);
+      console.log(`🔄 Transcoding enabled for: ${url}`);
       
       const ffmpeg = spawn('ffmpeg', [
         '-user_agent', 'Lavf/56.40.101',
@@ -872,6 +872,15 @@ app.get('/api/proxy', async (req, res) => {
         stdio: ['pipe', 'pipe', 'pipe']
       });
 
+      let ffmpegStarted = false;
+
+      ffmpeg.stdout.on('data', (chunk) => {
+        if (!ffmpegStarted) {
+          console.log(`✅ FFmpeg started sending data`);
+          ffmpegStarted = true;
+        }
+      });
+
       res.set('Content-Type', 'video/mp2t');
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Cache-Control', 'no-cache');
@@ -882,22 +891,18 @@ app.get('/api/proxy', async (req, res) => {
 
       ffmpeg.stderr.on('data', (data) => {
         const msg = data.toString();
-        if (msg.includes('Error') || msg.includes('error')) {
-          console.error(`FFmpeg error: ${msg}`);
+        // Log primeiras linhas e erros
+        if (msg.includes('Input #') || msg.includes('Output #') || msg.includes('Stream mapping') || msg.includes('Error') || msg.includes('error')) {
+          console.log(`FFmpeg: ${msg.substring(0, 200)}`);
         }
       });
 
       ffmpeg.on('error', (err) => {
         console.error(`❌ FFmpeg spawn error: ${err.message}`);
-        if (!res.headersSent) {
-          res.status(500).send('FFmpeg error');
-        }
       });
 
       ffmpeg.on('close', (code) => {
-        if (code !== 0) {
-          console.log(`FFmpeg closed with code ${code}`);
-        }
+        console.log(`FFmpeg closed with code ${code}`);
       });
 
       req.on('close', () => {
