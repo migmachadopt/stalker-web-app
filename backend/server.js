@@ -861,16 +861,13 @@ app.get('/api/proxy', async (req, res) => {
       console.log(`🔄 Transcoding enabled`);
       
       const ffmpeg = spawn('ffmpeg', [
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '2',
         '-user_agent', 'Lavf/56.40.101',
         '-i', url,
-        '-c:v', 'copy',           // Copia vídeo sem re-encoding
-        '-c:a', 'aac',            // Converte áudio para AAC-LC
-        '-b:a', '128k',           // Bitrate do áudio
-        '-f', 'mpegts',           // Formato de saída
-        '-'                       // Output para stdout
+        '-c:v', 'copy',
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-f', 'mpegts',
+        '-'
       ], {
         stdio: ['pipe', 'pipe', 'pipe']
       });
