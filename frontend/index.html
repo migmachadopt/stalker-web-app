@@ -264,7 +264,7 @@
           
           // Se nativo falhar, usar mpegts.js
           video.removeAttribute('src');
-          loadWithMpegts(absoluteUrl, video);
+          loadWithHls(absoluteUrl, video);
         }, 3000);
         
         video.oncanplay = () => {
