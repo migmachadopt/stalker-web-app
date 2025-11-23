@@ -279,9 +279,13 @@
             addLog(`⚠️ Timeout: stream não começou após 10s`);
             addLog(`   readyState: ${video.readyState}`);
             addLog(`   networkState: ${video.networkState}`);
+            addLog(`   paused: ${video.paused}`);
+            addLog(`   buffered ranges: ${video.buffered.length}`);
+            if (video.buffered.length > 0) {
+              addLog(`   buffered: ${video.buffered.start(0).toFixed(2)}s to ${video.buffered.end(0).toFixed(2)}s`);
+            }
+            addLog(`   currentTime: ${video.currentTime}`);
           }, 10000);
-
-
           
           // Logging detalhado - player events
           player.on(mpegts.Events.ERROR, (type, detail, info) => {
