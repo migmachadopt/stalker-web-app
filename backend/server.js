@@ -860,7 +860,7 @@ app.get('/api/proxy', async (req, res) => {
     console.log(`📡 Proxy request: ${url.substring(0, 80)}...`);
 
     if (transcode === '1') {
-      console.log(`🔄 Transcoding enabled for: ${url}`);
+      console.log(`🔄 Transcoding to FLV for: ${url}`);
       
       const ffmpeg = spawn('ffmpeg', [
         '-user_agent', 'Lavf/56.40.101',
@@ -870,13 +870,13 @@ app.get('/api/proxy', async (req, res) => {
         '-ac', '2',
         '-ar', '48000',
         '-b:a', '128k',
-        '-f', 'mpegts',
+        '-f', 'flv',
         '-'
       ], {
         stdio: ['pipe', 'pipe', 'pipe']
       });
 
-      res.set('Content-Type', 'video/mp2t');
+      res.set('Content-Type', 'video/x-flv');
       res.set('Access-Control-Allow-Origin', '*');
       res.set('Cache-Control', 'no-cache');
       res.set('Connection', 'keep-alive');
