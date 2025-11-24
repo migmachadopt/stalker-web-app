@@ -826,7 +826,7 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       streamUrl = streamUrl.replace(/^ffmpeg\s+/i, '').replace(/^ffmpeg:/i, '').trim();
     }
     
-    const proxyUrl = `/api/proxy?url=${encodeURIComponent(streamUrl)}`;
+    const proxyUrl = `/api/proxy?url=${encodeURIComponent(streamUrl)}&transcode=1`;
 
     res.json({
       success: true,
