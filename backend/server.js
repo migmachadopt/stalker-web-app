@@ -16,8 +16,8 @@ app.use(express.json());
 // 🔐 SECURITY CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || crypto.randomBytes(32).toString('hex');
-const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(64).toString('hex');
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '902074ebb39f692c6aa615edcacb0636bffd1295ad5351e239255fbd77c5d2a8';
+const JWT_SECRET = process.env.JWT_SECRET || '521b3586ca5e663b793ad71f9abc049a97caa2c3e5e419c3e7cad13a5ffba785f09696208c19edd861115f4e11eeb902ba380849dae78ce9f3e06b62dab8a09c';
 const SALT_ROUNDS = 10;
 const TOKEN_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 
