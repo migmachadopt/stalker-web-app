@@ -9,7 +9,6 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #fff; height: 100vh; overflow: hidden; }
@@ -264,7 +263,7 @@
           
           // Se nativo falhar, usar mpegts.js
           video.removeAttribute('src');
-          loadWithHls(absoluteUrl, video);
+          loadWithMpegts(absoluteUrl, video);
         }, 3000);
         
         video.oncanplay = () => {
@@ -274,19 +273,123 @@
         };
       };
 
-      function loadWithHls(absoluteUrl, video) {
-        if (Hls.isSupported()) {
-          addLog(`📺 Using hls.js`);
-          const hls = new Hls();
-          hls.loadSource(absoluteUrl);
-          hls.attachMedia(video);
+      function loadWithMpegts(absoluteUrl, video) {
+        if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
+          addLog(`📺 Using mpegts.js`);
           
-          hls.on(Hls.Events.MANIFEST_PARSED, () => {
-            addLog(`✅ HLS manifest parsed`);
-            video.play();
+          const player = mpegts.createPlayer({ 
+            type: 'mpegts', 
+            isLive: true, 
+            url: absoluteUrl,
+            cors: true,
+            withCredentials: false,
+            headers: {}
+          }, { 
+            enableWorker: false,
+            enableStashBuffer: true, 
+            stashInitialSize: 512 * 1024,
+            isLive: true,
+            lazyLoad: false,
+            lazyLoadMaxDuration: 0,
+            seekType: 'range',
+            rangeLoadZeroStart: true,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMinBackwardDuration: 30,
+            autoCleanupMaxBackwardDuration: 60,
+            fixAudioTimestampGap: true,
+            accurateSeek: false,
+            deferLoadAfterSourceOpen: false
           });
           
-          playerRef.current = hls;
+          player.attachMediaElement(video); 
+          player.load();
+          
+          const playTimeout = setTimeout(() => {
+            addLog(`⚠️ Timeout: stream não começou após 10s`);
+            addLog(`   readyState: ${video.readyState}`);
+            addLog(`   networkState: ${video.networkState}`);
+            addLog(`   paused: ${video.paused}`);
+            addLog(`   buffered ranges: ${video.buffered.length}`);
+            if (video.buffered.length > 0) {
+              addLog(`   buffered: ${video.buffered.start(0).toFixed(2)}s to ${video.buffered.end(0).toFixed(2)}s`);
+            }
+            addLog(`   currentTime: ${video.currentTime}`);
+          }, 10000);
+          
+          // Forçar play após 2 segundos
+          setTimeout(() => {
+            if (video.readyState >= 1) {
+              addLog('⏯️ Forcing play...');
+              video.play().catch(e => addLog(`Play error: ${e.message}`));
+            }
+          }, 2000);
+
+          player.on(mpegts.Events.ERROR, (type, detail, info) => {
+            addLog(`❌ ERROR: ${type} - ${detail}`);
+            if (info) addLog(`   Info: ${JSON.stringify(info)}`);
+          });
+          
+          player.on(mpegts.Events.MEDIA_INFO, (info) => {
+            addLog(`📊 Video: ${info.videoCodec || 'unknown'}, ${info.width}x${info.height}`);
+            addLog(`📊 Audio: ${info.audioCodec || 'unknown'}, ${info.audioSampleRate}Hz`);
+            
+            if (info.videoCodec && info.videoCodec.toLowerCase().includes('hevc')) {
+              addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
+            }
+          });
+          
+          player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
+            if (stats.decodedFrames === 0 && stats.droppedFrames > 0) {
+              addLog(`⚠️ Frames dropped: ${stats.droppedFrames} - possível codec não suportado`);
+            }
+            if (stats.speed) {
+              addLog(`📈 Speed: ${Math.round(stats.speed)} KB/s, Dropped: ${stats.droppedFrames}`);
+            }
+          });
+          
+          player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            addLog(`✅ Loading complete`);
+          });
+
+          player.on(mpegts.Events.RECOVERED_EARLY_EOF, () => {
+            addLog(`⚠️ Recovered from early EOF`);
+          });
+          
+          video.onloadstart = () => addLog(`🔄 Video load started`);
+          video.onloadeddata = () => addLog(`✅ Video data loaded`);
+          video.onerror = (e) => {
+            addLog(`❌ Video error: ${video.error?.message || 'unknown'}`);
+            addLog(`   Code: ${video.error?.code}`);
+          };
+          video.onstalled = () => addLog(`⚠️ Video stalled`);
+          video.onwaiting = () => addLog(`⏳ Video waiting for data...`);
+          
+          let hasPlayed = false; 
+          video.muted = false; 
+          video.volume = 1.0;
+          
+          video.oncanplay = () => {
+            clearTimeout(playTimeout); 
+            addLog(`✅ Video can play`);
+            if (!hasPlayed) { 
+              video.play().then(() => hasPlayed = true).catch(() => { 
+                video.muted = true; 
+                video.play().then(() => { 
+                  hasPlayed = true; 
+                  setTimeout(() => video.muted = false, 2000); 
+                }); 
+              }); 
+            } 
+          };
+          
+          video.oncanplaythrough = () => {
+            addLog('✅ Can play through!');
+            video.play().catch(() => {});
+          };
+          
+          video.onplaying = () => addLog('▶️ Playing!');
+          
+          playerRef.current = player;
         }
       }
 

@@ -855,9 +855,8 @@ app.get('/api/proxy', async (req, res) => {
 
     console.log(`📡 Proxy request: ${url.substring(0, 80)}...`);
 
-    // Se pedir transcoding, usa FFmpeg
     if (transcode === '1') {
-      console.log(`🔄 Transcoding to HLS for: ${url}`);
+      console.log(`🔄 Transcoding enabled for: ${url}`);
       
       const ffmpeg = spawn('ffmpeg', [
         '-user_agent', 'Lavf/56.40.101',
@@ -867,25 +866,10 @@ app.get('/api/proxy', async (req, res) => {
         '-ac', '2',
         '-ar', '48000',
         '-b:a', '128k',
-        '-f', 'hls',
-        '-hls_time', '2',
-        '-hls_list_size', '3',
-        '-hls_flags', 'delete_segments',
-        '-hls_segment_type', 'mpegts',
+        '-f', 'mpegts',
         '-'
       ], {
         stdio: ['pipe', 'pipe', 'pipe']
-      });
-
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-
-      let ffmpegStarted = false;
-
-      ffmpeg.stdout.on('data', (chunk) => {
-        if (!ffmpegStarted) {
-          console.log(`✅ FFmpeg started sending data`);
-          ffmpegStarted = true;
-        }
       });
 
       res.set('Content-Type', 'video/mp2t');
