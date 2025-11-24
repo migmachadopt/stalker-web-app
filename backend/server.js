@@ -18,6 +18,7 @@ app.use(express.json());
 
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '902074ebb39f692c6aa615edcacb0636bffd1295ad5351e239255fbd77c5d2a8';
 const JWT_SECRET = process.env.JWT_SECRET || '521b3586ca5e663b793ad71f9abc049a97caa2c3e5e419c3e7cad13a5ffba785f09696208c19edd861115f4e11eeb902ba380849dae78ce9f3e06b62dab8a09c';
+const STREAM_SECRET = process.env.STREAM_SECRET || crypto.randomBytes(32).toString('hex');
 const SALT_ROUNDS = 10;
 const TOKEN_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -28,6 +29,164 @@ const USERS_FILE = path.join(DATA_DIR, 'users.enc');
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📊 ADVANCED LOGGING SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const streamLogs = new Map(); // sessionId -> logs array
+
+class StreamLogger {
+  constructor(sessionId, channelName) {
+    this.sessionId = sessionId;
+    this.channelName = channelName;
+    this.logs = [];
+    this.startTime = Date.now();
+    this.metadata = {
+      channel: channelName,
+      startedAt: new Date().toISOString(),
+      userId: null
+    };
+    
+    // Store in global map
+    streamLogs.set(sessionId, this);
+  }
+  
+  log(level, category, message, data = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      elapsed: Date.now() - this.startTime,
+      level,      // info, warn, error, success
+      category,   // stream, ffmpeg, network, codec, player
+      message,
+      data
+    };
+    
+    this.logs.push(entry);
+    
+    // Console output with colors
+    const icons = {
+      info: 'ℹ️',
+      warn: '⚠️',
+      error: '❌',
+      success: '✅',
+      debug: '🔍'
+    };
+    
+    const icon = icons[level] || '📝';
+    console.log(`${icon} [${category.toUpperCase()}] ${message}`, data);
+    
+    // Keep only last 100 logs per session
+    if (this.logs.length > 100) {
+      this.logs = this.logs.slice(-100);
+    }
+  }
+  
+  info(category, message, data) { this.log('info', category, message, data); }
+  warn(category, message, data) { this.log('warn', category, message, data); }
+  error(category, message, data) { this.log('error', category, message, data); }
+  success(category, message, data) { this.log('success', category, message, data); }
+  debug(category, message, data) { this.log('debug', category, message, data); }
+  
+  setMetadata(key, value) {
+    this.metadata[key] = value;
+  }
+  
+  getFullReport() {
+    return {
+      sessionId: this.sessionId,
+      metadata: this.metadata,
+      duration: Date.now() - this.startTime,
+      logs: this.logs
+    };
+  }
+}
+
+// Get or create logger for session
+function getLogger(sessionId, channelName = 'Unknown') {
+  if (!streamLogs.has(sessionId)) {
+    return new StreamLogger(sessionId, channelName);
+  }
+  return streamLogs.get(sessionId);
+}
+
+// Cleanup old logs
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 60 * 60 * 1000; // 1 hour
+  
+  for (const [sessionId, logger] of streamLogs.entries()) {
+    if (now - logger.startTime > maxAge) {
+      streamLogs.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🛡️ STREAM URL PROTECTION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const streamTokens = new Map();
+
+function generateStreamToken(userId, streamUrl, channelInfo) {
+  const tokenId = crypto.randomBytes(16).toString('hex');
+  const expiresAt = Date.now() + 30000; // 30 segundos
+  
+  // Encriptar URL
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
+  let encrypted = cipher.update(streamUrl, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  
+  streamTokens.set(tokenId, {
+    userId,
+    encryptedUrl: encrypted,
+    iv: iv.toString('hex'),
+    expiresAt,
+    usedCount: 0,
+    maxUses: 1,
+    channelInfo
+  });
+  
+  // Auto-cleanup
+  setTimeout(() => {
+    streamTokens.delete(tokenId);
+  }, 35000);
+  
+  return tokenId;
+}
+
+function validateStreamToken(tokenId, userId) {
+  const token = streamTokens.get(tokenId);
+  
+  if (!token) {
+    return { valid: false, error: 'Token not found or expired' };
+  }
+  
+  if (token.userId !== userId) {
+    return { valid: false, error: 'Token user mismatch' };
+  }
+  
+  if (Date.now() > token.expiresAt) {
+    streamTokens.delete(tokenId);
+    return { valid: false, error: 'Token expired' };
+  }
+  
+  if (token.usedCount >= token.maxUses) {
+    streamTokens.delete(tokenId);
+    return { valid: false, error: 'Token already used' };
+  }
+  
+  token.usedCount++;
+  
+  // Decriptar URL
+  const iv = Buffer.from(token.iv, 'hex');
+  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
+  let decrypted = decipher.update(token.encryptedUrl, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  
+  return { valid: true, url: decrypted, channelInfo: token.channelInfo };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -65,20 +224,17 @@ function decrypt(encryptedObj) {
   return decrypted;
 }
 
-// Hash password with salt
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
   return { salt, hash };
 }
 
-// Verify password
 function verifyPassword(password, salt, storedHash) {
   const hash = crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
   return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(storedHash));
 }
 
-// Generate JWT-like token
 function generateAuthToken(userId, role) {
   const payload = {
     userId,
@@ -98,7 +254,6 @@ function generateAuthToken(userId, role) {
   return `${payloadB64}.${signature}`;
 }
 
-// Verify auth token
 function verifyAuthToken(token) {
   try {
     const [payloadB64, signature] = token.split('.');
@@ -115,7 +270,7 @@ function verifyAuthToken(token) {
     const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString());
     
     if (payload.exp < Date.now()) {
-      return null; // Token expired
+      return null;
     }
     
     return payload;
@@ -589,7 +744,6 @@ function getStalkerHeaders(token = '', macAddress = '') {
   };
 
   if (token) headers['Authorization'] = `Bearer ${token}`;
-
   if (macAddress) {
     headers['Cookie'] = `PHPSESSID=null; sn=93200916082029478; mac=${macAddress}; timezone=Europe/Lisbon; stb_lang=en`;
   }
@@ -799,9 +953,13 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🔒 PROTECTED STREAM ENDPOINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
 app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
   try {
-    const { sessionId, channelId, cmd } = req.body;
+    const { sessionId, channelId, cmd, channelName } = req.body;
 
     if (!sessionId || !stalkerSessions.has(sessionId)) {
       return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
@@ -813,26 +971,59 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Session access denied' });
     }
     
+    // Create logger for this stream
+    const logSessionId = `${sessionId}_${channelId}`;
+    const logger = getLogger(logSessionId, channelName);
+    logger.setMetadata('userId', req.user.userId);
+    logger.setMetadata('channelId', channelId);
+    
+    logger.info('stream', `Requesting stream for: ${channelName}`);
+    logger.debug('stream', 'CMD received', { cmd: cmd.substring(0, 100) + '...' });
+    
     const response = await axios.get(
       `${session.portalUrl}?type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&JsHttpRequest=1-xml`,
       { headers: getStalkerHeaders(session.token, session.macAddress), timeout: 15000 }
     );
 
     let streamUrl = response.data?.js?.cmd || response.data?.js || '';
-
-    console.log('Stream response:', JSON.stringify(response.data));
     
     if (typeof streamUrl === 'string') {
       streamUrl = streamUrl.replace(/^ffmpeg\s+/i, '').replace(/^ffmpeg:/i, '').trim();
     }
     
-    const proxyUrl = `/api/proxy?url=${encodeURIComponent(streamUrl)}&transcode=1`;
+    logger.success('stream', 'Stream URL obtained from portal');
+    logger.debug('network', 'URL preview', { preview: streamUrl.substring(0, 80) + '...' });
+    
+    // Detect stream type
+    const urlLower = streamUrl.toLowerCase();
+    let streamType = 'unknown';
+    if (urlLower.includes('.m3u8')) streamType = 'HLS';
+    else if (urlLower.includes('.mpd')) streamType = 'DASH';
+    else if (urlLower.includes('.ts')) streamType = 'MPEG-TS';
+    else if (urlLower.includes('.flv')) streamType = 'FLV';
+    else if (urlLower.includes('http')) streamType = 'HTTP Stream';
+    
+    logger.info('stream', `Stream type: ${streamType}`);
+    
+    // Generate protected token
+    const channelInfo = {
+      id: channelId,
+      name: channelName,
+      type: streamType
+    };
+    
+    const streamToken = generateStreamToken(req.user.userId, streamUrl, channelInfo);
+    const proxyUrl = `/api/stream/${streamToken}`;
+    
+    logger.success('stream', `Protected token generated: ${streamToken}`);
+    logger.setMetadata('streamToken', streamToken);
 
     res.json({
       success: true,
       streamUrl: proxyUrl,
-      originalUrl: streamUrl,
-      channelId
+      logSessionId,  // Para o frontend poder pedir logs
+      channelId,
+      streamType
     });
 
   } catch (error) {
@@ -842,142 +1033,289 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🔄 PROXY ENDPOINT COM TRANSCODING
+// 🔄 PROTECTED PROXY WITH TRANSCODING + ADVANCED LOGGING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/proxy', async (req, res) => {
+app.get('/api/stream/:tokenId', authMiddleware, async (req, res) => {
+  const { tokenId } = req.params;
+  let logger = null;
+  let ffmpegProcess = null;
+  
   try {
-    const { url, transcode } = req.query;
+    // Validate token
+    const validation = validateStreamToken(tokenId, req.user.userId);
     
-    if (!url) {
-      return res.status(400).send('URL parameter required');
+    if (!validation.valid) {
+      console.log(`❌ Token validation failed: ${validation.error}`);
+      return res.status(401).send('Unauthorized');
     }
-
-    delete req.headers.range;
-    delete req.headers['if-range'];
     
-    console.log(`📡 Proxy request: ${url.substring(0, 80)}...`);
-
-    if (transcode === '1') {
-      console.log(`🔄 Transcoding for: ${url}`);
+    const streamUrl = validation.url;
+    const channelInfo = validation.channelInfo;
+    
+    // Get or create logger
+    logger = streamLogs.get(tokenId) || new StreamLogger(tokenId, channelInfo.name);
+    
+    logger.info('proxy', `Stream request validated for: ${channelInfo.name}`);
+    logger.debug('proxy', 'Original URL length', { length: streamUrl.length });
+    
+    // Test URL accessibility
+    logger.info('network', 'Testing source URL accessibility...');
+    
+    try {
+      const testResponse = await axios.head(streamUrl, {
+        timeout: 5000,
+        maxRedirects: 5,
+        validateStatus: (status) => status < 500
+      });
       
-      const ffmpeg = spawn('ffmpeg', [
-        '-user_agent', 'Lavf/56.40.101',
-        '-i', url,
-        '-c:v', 'libx264',        // Re-encode vídeo
-        '-preset', 'ultrafast',   // Mais rápido possível
-        '-tune', 'zerolatency',   // Baixa latência
-        '-profile:v', 'baseline', // Profile mais compatível
-        '-level', '3.1',          // Level compatível
-        '-c:a', 'aac',
-        '-ac', '2',
-        '-ar', '48000',
-        '-b:a', '128k',
-        '-f', 'flv',
-        '-'
-      ], {
-        stdio: ['pipe', 'pipe', 'pipe']
+      logger.success('network', `Source accessible - HTTP ${testResponse.status}`);
+      logger.debug('network', 'Response headers', {
+        contentType: testResponse.headers['content-type'],
+        contentLength: testResponse.headers['content-length'],
+        server: testResponse.headers['server']
       });
-
-      res.set('Content-Type', 'video/x-flv');
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-cache');
-      res.set('Connection', 'keep-alive');
-      res.set('Transfer-Encoding', 'chunked');
-
-      ffmpeg.stdout.pipe(res);
-
-      ffmpeg.stderr.on('data', (data) => {
-        const msg = data.toString();
-        // Log primeiras linhas e erros
-        if (msg.includes('Input #') || msg.includes('Output #') || msg.includes('Stream mapping') || msg.includes('Error') || msg.includes('error')) {
-          console.log(`FFmpeg: ${msg.substring(0, 200)}`);
-        }
-      });
-
-      ffmpeg.on('error', (err) => {
-        console.error(`❌ FFmpeg spawn error: ${err.message}`);
-      });
-
-      ffmpeg.on('close', (code) => {
-        console.log(`FFmpeg closed with code ${code}`);
-      });
-
-      req.on('close', () => {
-        console.log('Client disconnected, killing FFmpeg');
-        ffmpeg.kill('SIGTERM');
-      });
-
-      return;
+      
+    } catch (testError) {
+      logger.error('network', `Source not accessible: ${testError.message}`);
+      return res.status(502).send('Source unavailable');
     }
-
-    // Sem transcoding - proxy normal
-    const playerHeaders = {
-      'User-Agent': 'Lavf/56.40.101',
-      'Icy-MetaData': '1',
-      'Accept-Encoding': 'identity',
-      'Connection': 'Keep-Alive',
-    };
-
-    const response = await axios({
-      method: 'get',
-      url: url,
-      responseType: 'stream',
-      timeout: 30000,
-      maxRedirects: 10,
-      headers: playerHeaders,
-      validateStatus: (status) => status >= 200 && status < 300,
-      httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
+    
+    // Start FFmpeg with detailed logging
+    logger.info('ffmpeg', 'Starting FFmpeg transcoding process');
+    logger.debug('ffmpeg', 'FFmpeg arguments', {
+      input: streamUrl.substring(0, 60) + '...',
+      videoCodec: 'libx264',
+      preset: 'ultrafast',
+      audioCodec: 'aac',
+      output: 'FLV'
     });
-
-    const finalUrl = response.request.res.responseUrl || url;
-    const contentType = response.headers['content-type'] || '';
     
-    console.log(`✅ Final URL: ${finalUrl.substring(0, 80)}...`);
-    console.log(`📦 Content-Type: ${contentType}`);
+    ffmpegProcess = spawn('ffmpeg', [
+      '-user_agent', 'Lavf/56.40.101',
+      '-i', streamUrl,
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-profile:v', 'baseline',
+      '-level', '3.1',
+      '-c:a', 'aac',
+      '-ac', '2',
+      '-ar', '48000',
+      '-b:a', '128k',
+      '-f', 'flv',
+      '-'
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
     
-    if (contentType.includes('mpegurl') || contentType.includes('m3u8') || finalUrl.includes('.m3u8')) {
-      let content = '';
-      response.data.on('data', chunk => content += chunk);
-      await new Promise((resolve, reject) => {
-        response.data.on('end', resolve);
-        response.data.on('error', reject);
-      });
-
-      const baseUrl = finalUrl.substring(0, finalUrl.lastIndexOf('/') + 1);
+    // FFmpeg stderr parsing
+    let ffmpegStarted = false;
+    let inputDetected = false;
+    let outputStarted = false;
+    
+    ffmpegProcess.stderr.on('data', (data) => {
+      const lines = data.toString().split('\n');
       
-      content = content.replace(/(^[^#\n][^\n]*)/gm, (match) => {
-        match = match.trim();
-        if (!match || match.startsWith('#')) return match;
+      lines.forEach(line => {
+        line = line.trim();
+        if (!line) return;
         
-        if (match.startsWith('http')) {
-          return `/api/proxy?url=${encodeURIComponent(match)}`;
-        } else {
-          return `/api/proxy?url=${encodeURIComponent(baseUrl + match)}`;
+        // Input stream detection
+        if (line.includes('Input #0')) {
+          inputDetected = true;
+          logger.success('ffmpeg', 'Input stream detected');
+        }
+        
+        // Input format
+        if (inputDetected && line.includes('from \'')) {
+          const match = line.match(/from '([^']+)'/);
+          if (match) {
+            logger.info('ffmpeg', `Input format: ${match[1]}`);
+          }
+        }
+        
+        // Duration
+        if (line.includes('Duration:')) {
+          const match = line.match(/Duration: ([\d:.]+)/);
+          if (match) {
+            logger.debug('ffmpeg', `Duration: ${match[1]}`);
+          }
+        }
+        
+        // Video codec detection
+        if (line.includes('Stream #0') && line.includes('Video:')) {
+          const codecMatch = line.match(/Video: ([^,]+)/);
+          const resMatch = line.match(/(\d+x\d+)/);
+          const fpsMatch = line.match(/([\d.]+) fps/);
+          const bitrateMatch = line.match(/([\d.]+) kb\/s/);
+          
+          const videoInfo = {
+            codec: codecMatch ? codecMatch[1].trim() : 'unknown',
+            resolution: resMatch ? resMatch[1] : 'unknown',
+            fps: fpsMatch ? fpsMatch[1] : 'unknown',
+            bitrate: bitrateMatch ? bitrateMatch[1] + ' kb/s' : 'unknown'
+          };
+          
+          logger.success('codec', `Video: ${videoInfo.codec} ${videoInfo.resolution} @ ${videoInfo.fps}fps`);
+          logger.debug('codec', 'Video details', videoInfo);
+          logger.setMetadata('videoCodec', videoInfo);
+        }
+        
+        // Audio codec detection
+        if (line.includes('Stream #0') && line.includes('Audio:')) {
+          const codecMatch = line.match(/Audio: ([^,]+)/);
+          const sampleMatch = line.match(/(\d+) Hz/);
+          const channelsMatch = line.match(/(mono|stereo|\d+ channels)/);
+          const bitrateMatch = line.match(/([\d.]+) kb\/s/);
+          
+          const audioInfo = {
+            codec: codecMatch ? codecMatch[1].trim() : 'unknown',
+            sampleRate: sampleMatch ? sampleMatch[1] + ' Hz' : 'unknown',
+            channels: channelsMatch ? channelsMatch[1] : 'unknown',
+            bitrate: bitrateMatch ? bitrateMatch[1] + ' kb/s' : 'unknown'
+          };
+          
+          logger.success('codec', `Audio: ${audioInfo.codec} ${audioInfo.sampleRate} ${audioInfo.channels}`);
+          logger.debug('codec', 'Audio details', audioInfo);
+          logger.setMetadata('audioCodec', audioInfo);
+        }
+        
+        // Output stream start
+        if (line.includes('Output #0')) {
+          outputStarted = true;
+          logger.success('ffmpeg', 'Output stream started');
+        }
+        
+        // Encoding progress
+        if (line.includes('frame=') && line.includes('fps=')) {
+          if (!ffmpegStarted) {
+            ffmpegStarted = true;
+            logger.success('ffmpeg', '🎬 Encoding started - stream is live!');
+          }
+          
+          // Parse progress (log only every 100 frames to avoid spam)
+          const frameMatch = line.match(/frame=\s*(\d+)/);
+          const fpsMatch = line.match(/fps=\s*([\d.]+)/);
+          const bitrateMatch = line.match(/bitrate=\s*([\d.]+kbits\/s)/);
+          
+          if (frameMatch && parseInt(frameMatch[1]) % 100 === 0) {
+            logger.debug('ffmpeg', 'Encoding progress', {
+              frame: frameMatch[1],
+              fps: fpsMatch ? fpsMatch[1] : 'unknown',
+              bitrate: bitrateMatch ? bitrateMatch[1] : 'unknown'
+            });
+          }
+        }
+        
+        // Errors
+        if (line.toLowerCase().includes('error') || line.toLowerCase().includes('invalid')) {
+          logger.error('ffmpeg', `FFmpeg error: ${line}`);
+        }
+        
+        // Warnings
+        if (line.toLowerCase().includes('warning')) {
+          logger.warn('ffmpeg', `FFmpeg warning: ${line}`);
         }
       });
+    });
+    
+    // Response headers
+    res.set('Content-Type', 'video/x-flv');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Connection', 'keep-alive');
+    res.set('Transfer-Encoding', 'chunked');
+    
+    logger.info('proxy', 'Response headers sent to client');
+    
+    // Pipe output to response
+    ffmpegProcess.stdout.pipe(res);
+    
+    // FFmpeg process events
+    ffmpegProcess.on('error', (err) => {
+      logger.error('ffmpeg', `Process spawn error: ${err.message}`);
+    });
+    
+    ffmpegProcess.on('close', (code) => {
+      logger.info('ffmpeg', `Process closed with code ${code}`);
+      if (code !== 0 && code !== null) {
+        logger.error('ffmpeg', `Abnormal exit code: ${code}`);
+      }
+    });
+    
+    // Client disconnect handler
+    req.on('close', () => {
+      logger.warn('proxy', 'Client disconnected');
+      if (ffmpegProcess && !ffmpegProcess.killed) {
+        logger.info('ffmpeg', 'Killing FFmpeg process');
+        ffmpegProcess.kill('SIGTERM');
+        
+        // Force kill after 2s
+        setTimeout(() => {
+          if (!ffmpegProcess.killed) {
+            logger.warn('ffmpeg', 'Force killing FFmpeg (SIGKILL)');
+            ffmpegProcess.kill('SIGKILL');
+          }
+        }, 2000);
+      }
+    });
+    
+  } catch (error) {
+    if (logger) {
+      logger.error('proxy', `Stream error: ${error.message}`);
+    }
+    console.error('❌ Stream Error:', error.message);
+    
+    if (ffmpegProcess && !ffmpegProcess.killed) {
+      ffmpegProcess.kill('SIGTERM');
+    }
+    
+    if (!res.headersSent) {
+      res.status(500).send('Stream error');
+    }
+  }
+});
 
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-cache');
-      return res.send(content);
-    } else {
-      res.set('Content-Type', contentType || 'video/mp2t');
-      res.set('Access-Control-Allow-Origin', '*');
-      res.set('Cache-Control', 'no-cache');
-      res.set('Connection', 'keep-alive');
-      res.set('Transfer-Encoding', 'chunked');
-      
-      response.data.pipe(res);
-      
-      req.on('close', () => {
-        response.data.destroy();
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📊 LOGS ENDPOINT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/stream/logs/:sessionId', authMiddleware, (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    
+    const logger = streamLogs.get(sessionId);
+    
+    if (!logger) {
+      return res.json({
+        success: false,
+        error: 'No logs found for this session'
       });
     }
-
+    
+    // Verify user owns this session
+    if (logger.metadata.userId !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+    
+    res.json({
+      success: true,
+      logs: logger.logs,
+      metadata: logger.metadata,
+      duration: Date.now() - logger.startTime
+    });
+    
   } catch (error) {
-    console.error('❌ Proxy Error:', error.message);
-    res.status(error.response?.status || 500).send('Proxy error: ' + error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get logs'
+    });
   }
 });
 
@@ -985,12 +1323,17 @@ app.get('/api/proxy', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    message: 'Backend is running!',
-    timestamp: new Date().toISOString()
+    message: 'Backend running with advanced logging!',
+    timestamp: new Date().toISOString(),
+    features: {
+      streamProtection: true,
+      advancedLogging: true,
+      codecDetection: true
+    }
   });
 });
 
-// Cleanup old sessions
+// Cleanup
 setInterval(() => {
   const now = Date.now();
   const oneHour = 60 * 60 * 1000;
@@ -998,19 +1341,29 @@ setInterval(() => {
   for (const [sessionId, session] of stalkerSessions.entries()) {
     if (now - session.createdAt > oneHour) {
       stalkerSessions.delete(sessionId);
-      console.log(`🧹 Cleaned expired IPTV session`);
+    }
+  }
+  
+  for (const [tokenId, token] of streamTokens.entries()) {
+    if (now > token.expiresAt) {
+      streamTokens.delete(tokenId);
     }
   }
 }, 5 * 60 * 1000);
 
 app.listen(PORT, () => {
   console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log('║    🚀 Stalker IPTV Backend - WITH TRANSCODING 🔄      ║');
+  console.log('║  🔒📊 IPTV Backend - Protected + Advanced Logging    ║');
   console.log('╚═══════════════════════════════════════════════════════╝');
   console.log(`\n📡 Server: http://localhost:${PORT}`);
   console.log(`✅ Health: http://localhost:${PORT}/api/health`);
-  console.log(`\n🔐 Default admin credentials:`);
+  console.log(`\n🔐 Features Enabled:`);
+  console.log(`   ✅ Stream URL Protection (30s tokens)`);
+  console.log(`   ✅ Advanced Logging System`);
+  console.log(`   ✅ Codec Detection`);
+  console.log(`   ✅ Real-time FFmpeg Monitoring`);
+  console.log(`   ✅ Network Diagnostics`);
+  console.log(`\n🔐 Default credentials:`);
   console.log(`   Username: admin`);
-  console.log(`   Password: admin123`);
-  console.log(`\n⚠️  IMPORTANT: Change the admin password after first login!\n`);
+  console.log(`   Password: admin123\n`);
 });
