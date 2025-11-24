@@ -853,7 +853,6 @@ app.get('/api/proxy', async (req, res) => {
       return res.status(400).send('URL parameter required');
     }
 
-    // Ignorar range requests - sempre enviar stream completo
     delete req.headers.range;
     delete req.headers['if-range'];
     
