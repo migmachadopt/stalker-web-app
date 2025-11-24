@@ -275,121 +275,67 @@
 
       function loadWithMpegts(absoluteUrl, video) {
         if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
-          addLog(`📺 Using mpegts.js`);
+          addLog(`📺 Using mpegts.js with fetch streaming`);
           
-          const player = mpegts.createPlayer({ 
-            type: 'mpegts', 
-            isLive: true, 
-            url: absoluteUrl,
-            cors: true,
-            withCredentials: false,
-            headers: {}
-          }, { 
-            enableWorker: false,
-            enableStashBuffer: true, 
-            stashInitialSize: 512 * 1024,
-            isLive: true,
-            lazyLoad: false,
-            lazyLoadMaxDuration: 0,
-            seekType: 'range',
-            rangeLoadZeroStart: true,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMinBackwardDuration: 30,
-            autoCleanupMaxBackwardDuration: 60,
-            fixAudioTimestampGap: true,
-            accurateSeek: false,
-            deferLoadAfterSourceOpen: false
-          });
-          
-          player.attachMediaElement(video); 
-          player.load();
-          
-          const playTimeout = setTimeout(() => {
-            addLog(`⚠️ Timeout: stream não começou após 10s`);
-            addLog(`   readyState: ${video.readyState}`);
-            addLog(`   networkState: ${video.networkState}`);
-            addLog(`   paused: ${video.paused}`);
-            addLog(`   buffered ranges: ${video.buffered.length}`);
-            if (video.buffered.length > 0) {
-              addLog(`   buffered: ${video.buffered.start(0).toFixed(2)}s to ${video.buffered.end(0).toFixed(2)}s`);
-            }
-            addLog(`   currentTime: ${video.currentTime}`);
-          }, 10000);
-          
-          // Forçar play após 2 segundos
-          setTimeout(() => {
-            if (video.readyState >= 1) {
-              addLog('⏯️ Forcing play...');
-              video.play().catch(e => addLog(`Play error: ${e.message}`));
-            }
-          }, 2000);
-
-          player.on(mpegts.Events.ERROR, (type, detail, info) => {
-            addLog(`❌ ERROR: ${type} - ${detail}`);
-            if (info) addLog(`   Info: ${JSON.stringify(info)}`);
-          });
-          
-          player.on(mpegts.Events.MEDIA_INFO, (info) => {
-            addLog(`📊 Video: ${info.videoCodec || 'unknown'}, ${info.width}x${info.height}`);
-            addLog(`📊 Audio: ${info.audioCodec || 'unknown'}, ${info.audioSampleRate}Hz`);
-            
-            if (info.videoCodec && info.videoCodec.toLowerCase().includes('hevc')) {
-              addLog(`⚠️ HEVC/H.265 detectado - não suportado pelo browser!`);
-            }
-          });
-          
-          player.on(mpegts.Events.STATISTICS_INFO, (stats) => {
-            if (stats.decodedFrames === 0 && stats.droppedFrames > 0) {
-              addLog(`⚠️ Frames dropped: ${stats.droppedFrames} - possível codec não suportado`);
-            }
-            if (stats.speed) {
-              addLog(`📈 Speed: ${Math.round(stats.speed)} KB/s, Dropped: ${stats.droppedFrames}`);
-            }
-          });
-          
-          player.on(mpegts.Events.LOADING_COMPLETE, () => {
-            addLog(`✅ Loading complete`);
-          });
-
-          player.on(mpegts.Events.RECOVERED_EARLY_EOF, () => {
-            addLog(`⚠️ Recovered from early EOF`);
-          });
-          
-          video.onloadstart = () => addLog(`🔄 Video load started`);
-          video.onloadeddata = () => addLog(`✅ Video data loaded`);
-          video.onerror = (e) => {
-            addLog(`❌ Video error: ${video.error?.message || 'unknown'}`);
-            addLog(`   Code: ${video.error?.code}`);
-          };
-          video.onstalled = () => addLog(`⚠️ Video stalled`);
-          video.onwaiting = () => addLog(`⏳ Video waiting for data...`);
-          
-          let hasPlayed = false; 
-          video.muted = false; 
-          video.volume = 1.0;
-          
-          video.oncanplay = () => {
-            clearTimeout(playTimeout); 
-            addLog(`✅ Video can play`);
-            if (!hasPlayed) { 
-              video.play().then(() => hasPlayed = true).catch(() => { 
-                video.muted = true; 
-                video.play().then(() => { 
-                  hasPlayed = true; 
-                  setTimeout(() => video.muted = false, 2000); 
-                }); 
-              }); 
-            } 
-          };
-          
-          video.oncanplaythrough = () => {
-            addLog('✅ Can play through!');
-            video.play().catch(() => {});
-          };
-          
-          video.onplaying = () => addLog('▶️ Playing!');
-          
-          playerRef.current = player;
+          // Usar Fetch para manter uma única conexão
+          fetch(absoluteUrl)
+            .then(response => {
+              if (!response.ok) throw new Error(`HTTP ${response.status}`);
+              
+              const reader = response.body.getReader();
+              const stream = new ReadableStream({
+                start(controller) {
+                  function push() {
+                    reader.read().then(({ done, value }) => {
+                      if (done) {
+                        controller.close();
+                        return;
+                      }
+                      controller.enqueue(value);
+                      push();
+                    }).catch(err => {
+                      addLog(`❌ Stream error: ${err.message}`);
+                      controller.error(err);
+                    });
+                  }
+                  push();
+                }
+              });
+              
+              // Criar Blob URL a partir do stream
+              return new Response(stream).blob();
+            })
+            .then(blob => {
+              const blobUrl = URL.createObjectURL(blob);
+              addLog(`✅ Created blob URL from stream`);
+              
+              // Agora usar mpegts.js com o blob
+              const player = mpegts.createPlayer({ 
+                type: 'mpegts', 
+                isLive: false,  // Blob não é live
+                url: blobUrl
+              }, { 
+                enableWorker: false,
+                enableStashBuffer: true
+              });
+              
+              player.attachMediaElement(video); 
+              player.load();
+              
+              player.on(mpegts.Events.ERROR, (type, detail) => {
+                addLog(`❌ ERROR: ${type} - ${detail}`);
+              });
+              
+              video.oncanplay = () => {
+                addLog(`✅ Can play`);
+                video.play();
+              };
+              
+              playerRef.current = player;
+            })
+            .catch(err => {
+              addLog(`❌ Fetch error: ${err.message}`);
+            });
         }
       }
 
