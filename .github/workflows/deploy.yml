@@ -43,10 +43,10 @@ jobs:
     if: always() && (needs.test.result == 'success' || needs.test.result == 'skipped')
     
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: 📋 System Info
+      - name: 📋 System information
         run: |
           echo "╔═══════════════════════════════════════════════════════╗"
           echo "║           📊 SYSTEM INFORMATION                       ║"
@@ -58,53 +58,53 @@ jobs:
           echo "🔑 Groups: $(groups)"
           echo ""
 
-      - name: 🔒 Garantir symlink de data/
+      - name: 🔒 Ensure data/ is a symlink
         run: |
           echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║           🔒 PROTEÇÃO DE DADOS                        ║"
+          echo "║           🔒 DATA PROTECTION                          ║"
           echo "╚═══════════════════════════════════════════════════════╝"
           
-          # Criar localização permanente
+          # Create permanent location
           sudo mkdir -p /var/lib/iptv-player/data
           
-          # Se data/ não for symlink, converter
+          # Convert to symlink if needed
           if [ ! -L "${{ env.APP_DIR }}/backend/data" ]; then
-            echo "⚠️  data/ não é symlink - a converter..."
+            echo "⚠️  data/ is not a symlink - converting..."
             
-            # Se for pasta, mover conteúdo
+            # If it's a directory, move contents
             if [ -d "${{ env.APP_DIR }}/backend/data" ]; then
-              echo "📦 Movendo dados existentes..."
+              echo "📦 Moving existing data..."
               sudo cp -rv "${{ env.APP_DIR }}/backend/data/"* /var/lib/iptv-player/data/ 2>/dev/null || true
               sudo rm -rf "${{ env.APP_DIR }}/backend/data"
             fi
             
-            # Criar symlink
+            # Create symlink
             sudo ln -sf /var/lib/iptv-player/data "${{ env.APP_DIR }}/backend/data"
-            echo "✅ Symlink criado"
+            echo "✅ Symlink created"
           else
-            echo "✅ data/ já é symlink"
+            echo "✅ data/ is already a symlink"
           fi
           
-          # Verificar
+          # Verify
           echo ""
           echo "🔗 Status:"
-          ls -la "${{ env.APP_DIR }}/backend/" | grep data || echo "  Symlink não existe!"
+          ls -la "${{ env.APP_DIR }}/backend/" | grep data || echo "  Symlink not found!"
 
-      - name: 💾 Backup de .env
+      - name: 💾 Backup .env file
         run: |
-          # APENAS .env - NUNCA fazer backup de data/
+          # ONLY .env - NEVER backup data/
           if [ -f "${{ env.APP_DIR }}/.env" ]; then
             sudo cp "${{ env.APP_DIR }}/.env" /tmp/.env.backup
             echo "✅ .env backed up"
           fi
 
-      - name: 📤 Deploy Backend
+      - name: 📤 Deploy backend
         run: |
           echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║           📤 DEPLOY DO BACKEND                        ║"
+          echo "║           📤 BACKEND DEPLOYMENT                       ║"
           echo "╚═══════════════════════════════════════════════════════╝"
           
-          # Rsync EXCLUINDO data/ e .env
+          # Rsync EXCLUDING data/ and .env
           sudo rsync -av \
             --exclude 'node_modules' \
             --exclude 'data' \
@@ -113,26 +113,26 @@ jobs:
             --delete \
             ./backend/ ${{ env.APP_DIR }}/backend/
           
-          echo "✅ Backend sincronizado"
+          echo "✅ Backend synchronized"
 
-      - name: 🔗 Recriar symlink (garantia)
+      - name: 🔗 Recreate symlink (safety net)
         run: |
-          # Se rsync removeu, recriar
+          # Recreate if rsync removed it
           if [ ! -e "${{ env.APP_DIR }}/backend/data" ]; then
-            echo "⚠️  Symlink removido - a recriar..."
+            echo "⚠️  Symlink removed - recreating..."
             sudo ln -sf /var/lib/iptv-player/data "${{ env.APP_DIR }}/backend/data"
           fi
           
-          # Verificar
+          # Verify
           if [ -L "${{ env.APP_DIR }}/backend/data" ]; then
             echo "✅ Symlink OK"
             ls -la "${{ env.APP_DIR }}/backend/" | grep data
           else
-            echo "❌ ERRO: data/ NÃO é symlink!"
+            echo "❌ ERROR: data/ is NOT a symlink!"
             exit 1
           fi
 
-      - name: ✅ Restaurar .env
+      - name: ✅ Restore .env file
         run: |
           if [ -f "/tmp/.env.backup" ]; then
             sudo cp /tmp/.env.backup "${{ env.APP_DIR }}/.env"
@@ -140,54 +140,54 @@ jobs:
             echo "✅ .env restored"
           fi
 
-      - name: 📤 Deploy Frontend
+      - name: 📤 Deploy frontend
         run: |
           sudo rsync -av --delete ./frontend/ ${{ env.APP_DIR }}/frontend/
-          echo "✅ Frontend sincronizado"
+          echo "✅ Frontend synchronized"
 
-      - name: 📦 Instalar dependências
+      - name: 📦 Install dependencies
         run: |
           cd ${{ env.APP_DIR }}/backend
           sudo -u iptv npm ci --production
-          echo "✅ Dependências instaladas"
+          echo "✅ Dependencies installed"
 
-      - name: 🔐 Corrigir permissões
+      - name: 🔐 Fix permissions
         run: |
-          # App
+          # Application files
           sudo chown -R iptv:iptv ${{ env.APP_DIR }}
           
-          # Dados permanentes - CRÍTICO!
+          # Permanent data location - CRITICAL!
           sudo chown -R iptv:iptv /var/lib/iptv-player
           sudo chmod 755 /var/lib/iptv-player/data
           
-          # Ficheiros em data/
+          # Files in data/
           if sudo test -f /var/lib/iptv-player/data/users.enc; then
             sudo chmod 644 /var/lib/iptv-player/data/users.enc
           fi
           
-          # Symlink
+          # Symlink ownership
           sudo chown -h iptv:iptv "${{ env.APP_DIR }}/backend/data"
           
-          # .env
+          # .env file
           if [ -f "${{ env.APP_DIR }}/.env" ]; then
             sudo chmod 600 "${{ env.APP_DIR }}/.env"
           fi
           
-          echo "✅ Permissões corrigidas"
+          echo "✅ Permissions fixed"
           
-          # Testar acesso
+          # Test access
           echo ""
-          echo "🧪 Teste de acesso como iptv:"
+          echo "🧪 Testing access as iptv user:"
           if sudo -u iptv test -r /var/lib/iptv-player/data/users.enc 2>/dev/null; then
-            echo "✅ iptv consegue ler users.enc"
+            echo "✅ iptv can read users.enc"
           else
-            echo "⚠️  users.enc não existe (será criado no primeiro login)"
+            echo "⚠️  users.enc not found (will be created on first login)"
           fi
 
-      - name: 🔐 Verificar .env
+      - name: 🔐 Verify .env file
         run: |
           if [ ! -f "${{ env.APP_DIR }}/.env" ]; then
-            echo "⚠️  Criando .env com valores default..."
+            echo "⚠️  Creating .env with default values..."
             cat > /tmp/.env.new << 'EOF'
           NODE_ENV=production
           PORT=3001
@@ -199,51 +199,51 @@ jobs:
             sudo chmod 600 "${{ env.APP_DIR }}/.env"
           fi
 
-      - name: 🔄 Reiniciar Backend
+      - name: 🔄 Restart backend
         run: |
           cd ${{ env.APP_DIR }}
           
           if ! command -v pm2 &> /dev/null; then
-            echo "📦 Instalando PM2..."
+            echo "📦 Installing PM2..."
             sudo npm install -g pm2
           fi
           
           if sudo -u iptv pm2 describe iptv-backend > /dev/null 2>&1; then
-            echo "🔄 Reiniciando..."
+            echo "🔄 Restarting application..."
             sudo -u iptv pm2 restart iptv-backend --update-env
           else
-            echo "🚀 Iniciando..."
+            echo "🚀 Starting application..."
             cd backend
             sudo -u iptv pm2 start server.js --name iptv-backend
           fi
           
           sudo -u iptv pm2 save
-          echo "✅ Backend reiniciado"
+          echo "✅ Backend restarted"
 
-      - name: ⏳ Aguardar
+      - name: ⏳ Wait for initialization
         run: sleep 5
 
-      - name: ✅ Verificação Final
+      - name: ✅ Final verification
         if: always()
         run: |
           echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║           📊 VERIFICAÇÃO FINAL                        ║"
+          echo "║           📊 FINAL VERIFICATION                       ║"
           echo "╚═══════════════════════════════════════════════════════╝"
           
           echo ""
           echo "🔗 Symlink status:"
-          ls -la ${{ env.APP_DIR }}/backend/ | grep data || echo "  data/ não encontrado"
+          ls -la ${{ env.APP_DIR }}/backend/ | grep data || echo "  data/ not found"
           
           echo ""
-          echo "📂 Verificar users.enc como iptv:"
+          echo "📂 Verify users.enc as iptv user:"
           if sudo -u iptv test -f /var/lib/iptv-player/data/users.enc 2>/dev/null; then
             SIZE=$(sudo -u iptv stat -c%s /var/lib/iptv-player/data/users.enc 2>/dev/null || echo "?")
-            echo "✅ users.enc existe e iptv consegue aceder (${SIZE} bytes)"
+            echo "✅ users.enc exists and iptv can access it (${SIZE} bytes)"
           else
-            echo "⚠️  users.enc não encontrado (será criado no primeiro login)"
+            echo "⚠️  users.enc not found (will be created on first login)"
           fi
 
-      - name: 🏥 Health Check
+      - name: 🏥 Health check
         run: |
           echo ""
           echo "╔═══════════════════════════════════════════════════════╗"
@@ -252,24 +252,24 @@ jobs:
           
           for i in {1..5}; do
             if curl -s http://localhost:3001/api/health | grep -q "ok"; then
-              echo "✅ Backend ONLINE!"
+              echo "✅ Backend is ONLINE!"
               curl -s http://localhost:3001/api/health | jq . 2>/dev/null || echo ""
               exit 0
             fi
-            echo "⏳ Tentativa $i/5..."
+            echo "⏳ Attempt $i/5..."
             sleep 3
           done
           
-          echo "❌ Health check falhou"
+          echo "❌ Health check failed"
           sudo -u iptv pm2 logs iptv-backend --lines 50
           exit 1
 
-      - name: 📊 Resumo
+      - name: 📊 Deployment summary
         if: always()
         run: |
           echo ""
           echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║           📊 DEPLOY FINALIZADO                        ║"
+          echo "║           📊 DEPLOYMENT COMPLETE                      ║"
           echo "╚═══════════════════════════════════════════════════════╝"
           echo ""
           sudo -u iptv pm2 status
@@ -284,8 +284,8 @@ jobs:
     if: always()
     
     steps:
-      - name: 🧹 Limpar
+      - name: 🧹 Clean temporary files
         run: |
           sudo rm -f /tmp/.env.backup 2>/dev/null || true
           npm cache clean --force 2>/dev/null || true
-          echo "✅ Cleanup concluído"
+          echo "✅ Cleanup complete"
