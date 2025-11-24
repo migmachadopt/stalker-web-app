@@ -242,35 +242,53 @@
         const video = videoRef.current; 
         if (!video) return;
         
+        // Limpar player anterior
         if (playerRef.current) { 
           playerRef.current.destroy?.(); 
           playerRef.current = null; 
         }
+        
+        // Limpar src do vídeo
+        video.removeAttribute('src');
+        video.load();
         
         // Converter URL relativo para absoluto
         const absoluteUrl = streamUrl.startsWith('/') 
           ? window.location.origin + streamUrl 
           : streamUrl;
         
-        addLog(`🎬 Attempting native playback...`);
+        addLog(`📺 Loading with mpegts.js...`);
         
-        // Tentar player nativo primeiro
-        video.src = absoluteUrl;
-        video.load();
+        if (!mpegts || !mpegts.isSupported()) {
+          addLog(`❌ mpegts.js not supported`);
+          return;
+        }
         
-        const nativeTimeout = setTimeout(() => {
-          addLog(`⚠️ Native player failed, trying mpegts.js...`);
-          
-          // Se nativo falhar, usar mpegts.js
-          video.removeAttribute('src');
-          loadWithMpegts(absoluteUrl, video);
-        }, 3000);
+        const player = mpegts.createPlayer({ 
+          type: 'mpegts', 
+          isLive: true, 
+          url: absoluteUrl
+        }, { 
+          enableWorker: false,
+          enableStashBuffer: false,  // DESABILITAR buffer
+          isLive: true,
+          lazyLoad: false,
+          autoCleanupSourceBuffer: true
+        });
+        
+        player.attachMediaElement(video); 
+        player.load();
+        
+        player.on(mpegts.Events.ERROR, (type, detail) => {
+          addLog(`❌ mpegts error: ${type}`);
+        });
         
         video.oncanplay = () => {
-          clearTimeout(nativeTimeout);
-          addLog(`✅ Native player working!`);
-          video.play().catch(e => addLog(`Play error: ${e.message}`));
+          addLog(`✅ Can play`);
+          video.play();
         };
+        
+        playerRef.current = player;
       };
 
       function loadWithMpegts(absoluteUrl, video) {
