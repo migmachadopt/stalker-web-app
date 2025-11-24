@@ -242,22 +242,19 @@
         const video = videoRef.current; 
         if (!video) return;
         
-        // Limpar player anterior
         if (playerRef.current) { 
           playerRef.current.destroy?.(); 
           playerRef.current = null; 
         }
         
-        // Limpar src do vídeo
         video.removeAttribute('src');
         video.load();
         
-        // Converter URL relativo para absoluto
         const absoluteUrl = streamUrl.startsWith('/') 
           ? window.location.origin + streamUrl 
           : streamUrl;
         
-        addLog(`📺 Loading with mpegts.js...`);
+        addLog(`📺 Loading: ${absoluteUrl.substring(0, 60)}...`);
         
         if (!mpegts || !mpegts.isSupported()) {
           addLog(`❌ mpegts.js not supported`);
@@ -270,19 +267,29 @@
           url: absoluteUrl
         }, { 
           enableWorker: false,
-          enableStashBuffer: false,  // DESABILITAR buffer
-          isLive: true,
-          lazyLoad: false,
-          autoCleanupSourceBuffer: true
+          enableStashBuffer: true,
+          stashInitialSize: 128 * 1024,
+          isLive: true
         });
         
         player.attachMediaElement(video); 
         player.load();
         
+        addLog(`✅ Player created and loading...`);
+        
         player.on(mpegts.Events.ERROR, (type, detail) => {
-          addLog(`❌ mpegts error: ${type}`);
+          addLog(`❌ ERROR: ${type} - ${detail}`);
         });
         
+        player.on(mpegts.Events.LOADING_COMPLETE, () => {
+          addLog(`✅ Loading complete`);
+        });
+        
+        player.on(mpegts.Events.MEDIA_INFO, (info) => {
+          addLog(`📊 Media info received`);
+        });
+        
+        video.onloadstart = () => addLog(`🔄 Video loading...`);
         video.oncanplay = () => {
           addLog(`✅ Can play`);
           video.play();
