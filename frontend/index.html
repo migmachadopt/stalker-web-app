@@ -268,8 +268,10 @@
         }, { 
           enableWorker: false,
           enableStashBuffer: true,
-          stashInitialSize: 128 * 1024,
-          isLive: true
+          stashInitialSize: 384 * 1024,  // 384KB - buffer maior
+          isLive: true,
+          lazyLoad: false,
+          autoCleanupSourceBuffer: true
         });
         
         player.attachMediaElement(video); 
@@ -277,23 +279,32 @@
         
         addLog(`✅ Player created and loading...`);
         
+        // Forçar play após 3 segundos
+        setTimeout(() => {
+          addLog(`⏯️ Force play attempt...`);
+          addLog(`   readyState: ${video.readyState}`);
+          addLog(`   buffered: ${video.buffered.length}`);
+          if (video.readyState >= 1) {
+            video.play().catch(e => addLog(`Play error: ${e.message}`));
+          }
+        }, 3000);
+        
         player.on(mpegts.Events.ERROR, (type, detail) => {
           addLog(`❌ ERROR: ${type} - ${detail}`);
         });
         
-        player.on(mpegts.Events.LOADING_COMPLETE, () => {
-          addLog(`✅ Loading complete`);
-        });
-        
         player.on(mpegts.Events.MEDIA_INFO, (info) => {
-          addLog(`📊 Media info received`);
+          addLog(`📊 Media info: ${info.videoCodec}, ${info.audioCodec}`);
         });
         
         video.onloadstart = () => addLog(`🔄 Video loading...`);
+        video.onloadeddata = () => addLog(`✅ Data loaded`);
         video.oncanplay = () => {
-          addLog(`✅ Can play`);
+          addLog(`✅ Can play!`);
           video.play();
         };
+        video.onplaying = () => addLog(`▶️ Playing!`);
+        video.onerror = () => addLog(`❌ Video error: ${video.error?.code}`);
         
         playerRef.current = player;
       };
