@@ -274,69 +274,68 @@
       };
 
       function loadWithMpegts(absoluteUrl, video) {
-        if (typeof mpegts !== 'undefined' && mpegts.isSupported()) {
-          addLog(`📺 Using mpegts.js with fetch streaming`);
+        addLog(`📺 Loading with MediaSource streaming...`);
+        
+        if (!window.MediaSource) {
+          addLog(`❌ MediaSource not supported`);
+          return;
+        }
+        
+        const mediaSource = new MediaSource();
+        video.src = URL.createObjectURL(mediaSource);
+        
+        mediaSource.addEventListener('sourceopen', () => {
+          const sourceBuffer = mediaSource.addSourceBuffer('video/mp2t; codecs="avc1.640028,mp4a.40.2"');
           
-          // Usar Fetch para manter uma única conexão
           fetch(absoluteUrl)
             .then(response => {
-              if (!response.ok) throw new Error(`HTTP ${response.status}`);
-              
               const reader = response.body.getReader();
-              const stream = new ReadableStream({
-                start(controller) {
-                  function push() {
-                    reader.read().then(({ done, value }) => {
-                      if (done) {
-                        controller.close();
-                        return;
-                      }
-                      controller.enqueue(value);
-                      push();
-                    }).catch(err => {
-                      addLog(`❌ Stream error: ${err.message}`);
-                      controller.error(err);
-                    });
+              
+              function push() {
+                reader.read().then(({ done, value }) => {
+                  if (done) {
+                    if (mediaSource.readyState === 'open') {
+                      mediaSource.endOfStream();
+                    }
+                    addLog(`✅ Stream ended`);
+                    return;
                   }
-                  push();
+                  
+                  if (sourceBuffer.updating) {
+                    setTimeout(() => push(), 100);
+                    return;
+                  }
+                  
+                  try {
+                    sourceBuffer.appendBuffer(value);
+                    push();
+                  } catch (e) {
+                    addLog(`❌ Append error: ${e.message}`);
+                  }
+                });
+              }
+              
+              sourceBuffer.addEventListener('updateend', () => {
+                if (!video.paused && video.readyState >= 2) {
+                  return;
+                }
+                if (video.buffered.length > 0 && !hasPlayed) {
+                  addLog(`✅ Starting playback`);
+                  video.play();
+                  hasPlayed = true;
                 }
               });
               
-              // Criar Blob URL a partir do stream
-              return new Response(stream).blob();
+              let hasPlayed = false;
+              push();
             })
-            .then(blob => {
-              const blobUrl = URL.createObjectURL(blob);
-              addLog(`✅ Created blob URL from stream`);
-              
-              // Agora usar mpegts.js com o blob
-              const player = mpegts.createPlayer({ 
-                type: 'mpegts', 
-                isLive: false,  // Blob não é live
-                url: blobUrl
-              }, { 
-                enableWorker: false,
-                enableStashBuffer: true
-              });
-              
-              player.attachMediaElement(video); 
-              player.load();
-              
-              player.on(mpegts.Events.ERROR, (type, detail) => {
-                addLog(`❌ ERROR: ${type} - ${detail}`);
-              });
-              
-              video.oncanplay = () => {
-                addLog(`✅ Can play`);
-                video.play();
-              };
-              
-              playerRef.current = player;
-            })
-            .catch(err => {
-              addLog(`❌ Fetch error: ${err.message}`);
-            });
-        }
+            .catch(err => addLog(`❌ Fetch error: ${err.message}`));
+        });
+        
+        video.oncanplay = () => {
+          addLog(`✅ Can play`);
+          video.play();
+        };
       }
 
       const toggleFullscreen = () => { isFullscreen ? document.exitFullscreen() : document.querySelector('.player-section')?.requestFullscreen(); setIsFullscreen(!isFullscreen); };
