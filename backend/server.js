@@ -860,12 +860,16 @@ app.get('/api/proxy', async (req, res) => {
     console.log(`📡 Proxy request: ${url.substring(0, 80)}...`);
 
     if (transcode === '1') {
-      console.log(`🔄 Transcoding to FLV for: ${url}`);
+      console.log(`🔄 Transcoding for: ${url}`);
       
       const ffmpeg = spawn('ffmpeg', [
         '-user_agent', 'Lavf/56.40.101',
         '-i', url,
-        '-c:v', 'copy',
+        '-c:v', 'libx264',        // Re-encode vídeo
+        '-preset', 'ultrafast',   // Mais rápido possível
+        '-tune', 'zerolatency',   // Baixa latência
+        '-profile:v', 'baseline', // Profile mais compatível
+        '-level', '3.1',          // Level compatível
         '-c:a', 'aac',
         '-ac', '2',
         '-ar', '48000',
