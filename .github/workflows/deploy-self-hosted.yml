@@ -97,7 +97,8 @@ jobs:
           # Copiar novos ficheiros (SEM --delete na pasta data)
           sudo rsync -av \
             --exclude 'node_modules' \
-            --delete --exclude 'data' \
+            --exclude 'data' \
+            --delete \
             ./backend/ ${{ env.APP_DIR }}/backend/
           
           # Restaurar ficheiros preservados
