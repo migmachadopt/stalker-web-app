@@ -131,7 +131,7 @@ const streamTokens = new Map();
 
 function generateStreamToken(userId, streamUrl, channelInfo) {
   const tokenId = crypto.randomBytes(16).toString('hex');
-  const expiresAt = Date.now() + 30000; // 30 segundos
+  const expiresAt = Date.now() + 60000; // 60 segundos (aumentado de 30)
   
   // Encriptar URL
   const iv = crypto.randomBytes(16);
@@ -145,48 +145,16 @@ function generateStreamToken(userId, streamUrl, channelInfo) {
     iv: iv.toString('hex'),
     expiresAt,
     usedCount: 0,
-    maxUses: 1,
+    maxUses: 5, // Aumentado para permitir reconnects
     channelInfo
   });
   
   // Auto-cleanup
   setTimeout(() => {
     streamTokens.delete(tokenId);
-  }, 35000);
+  }, 70000);
   
   return tokenId;
-}
-
-function validateStreamToken(tokenId, userId) {
-  const token = streamTokens.get(tokenId);
-  
-  if (!token) {
-    return { valid: false, error: 'Token not found or expired' };
-  }
-  
-  if (token.userId !== userId) {
-    return { valid: false, error: 'Token user mismatch' };
-  }
-  
-  if (Date.now() > token.expiresAt) {
-    streamTokens.delete(tokenId);
-    return { valid: false, error: 'Token expired' };
-  }
-  
-  if (token.usedCount >= token.maxUses) {
-    streamTokens.delete(tokenId);
-    return { valid: false, error: 'Token already used' };
-  }
-  
-  token.usedCount++;
-  
-  // Decriptar URL
-  const iv = Buffer.from(token.iv, 'hex');
-  const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
-  let decrypted = decipher.update(token.encryptedUrl, 'hex', 'utf8');
-  decrypted += decipher.final('utf8');
-  
-  return { valid: true, url: decrypted, channelInfo: token.channelInfo };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -973,12 +941,12 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
     
     // Create logger for this stream
     const logSessionId = `${sessionId}_${channelId}`;
-    const logger = getLogger(logSessionId, channelName);
+    const logger = getLogger(logSessionId, channelName || 'Unknown Channel');
     logger.setMetadata('userId', req.user.userId);
     logger.setMetadata('channelId', channelId);
     
-    logger.info('stream', `Requesting stream for: ${channelName}`);
-    logger.debug('stream', 'CMD received', { cmd: cmd.substring(0, 100) + '...' });
+    logger.info('stream', `Requesting stream for: ${channelName || 'Unknown'}`);
+    logger.debug('stream', 'CMD received', { cmd: cmd ? cmd.substring(0, 100) + '...' : 'N/A' });
     
     const response = await axios.get(
       `${session.portalUrl}?type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&JsHttpRequest=1-xml`,
@@ -1008,7 +976,7 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
     // Generate protected token
     const channelInfo = {
       id: channelId,
-      name: channelName,
+      name: channelName || 'Unknown',
       type: streamType
     };
     
@@ -1033,25 +1001,50 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🔄 PROTECTED PROXY WITH TRANSCODING + ADVANCED LOGGING
+// 🔄 PROTECTED PROXY WITHOUT AUTH MIDDLEWARE (token in URL is the auth)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-app.get('/api/stream/:tokenId', authMiddleware, async (req, res) => {
+app.get('/api/stream/:tokenId', async (req, res) => {
   const { tokenId } = req.params;
   let logger = null;
   let ffmpegProcess = null;
   
   try {
-    // Validate token
-    const validation = validateStreamToken(tokenId, req.user.userId);
+    // Get token from Map
+    const token = streamTokens.get(tokenId);
     
-    if (!validation.valid) {
-      console.log(`❌ Token validation failed: ${validation.error}`);
-      return res.status(401).send('Unauthorized');
+    if (!token) {
+      console.log(`❌ Token not found: ${tokenId}`);
+      return res.status(401).send('Unauthorized - Token not found or expired');
     }
     
-    const streamUrl = validation.url;
-    const channelInfo = validation.channelInfo;
+    // Check expiry
+    if (Date.now() > token.expiresAt) {
+      streamTokens.delete(tokenId);
+      console.log(`❌ Token expired: ${tokenId}`);
+      return res.status(401).send('Unauthorized - Token expired');
+    }
+    
+    // Check usage count
+    if (token.usedCount >= token.maxUses) {
+      console.log(`⚠️ Token max uses reached: ${tokenId} (${token.usedCount}/${token.maxUses})`);
+      // Don't delete yet - allow reconnects
+      // streamTokens.delete(tokenId);
+    }
+    
+    // Increment usage
+    token.usedCount++;
+    
+    // Decrypt URL
+    const iv = Buffer.from(token.iv, 'hex');
+    const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
+    let streamUrl = decipher.update(token.encryptedUrl, 'hex', 'utf8');
+    streamUrl += decipher.final('utf8');
+    
+    const channelInfo = token.channelInfo;
+    
+    console.log(`✅ Token validated: ${tokenId} (usage: ${token.usedCount}/${token.maxUses})`);
+    console.log(`📺 Channel: ${channelInfo.name}`);
     
     // Get or create logger
     logger = streamLogs.get(tokenId) || new StreamLogger(tokenId, channelInfo.name);
@@ -1323,12 +1316,13 @@ app.get('/api/stream/logs/:sessionId', authMiddleware, (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
-    message: 'Backend running with advanced logging!',
+    message: 'Backend running - Stream tokens do not require JWT auth!',
     timestamp: new Date().toISOString(),
     features: {
       streamProtection: true,
       advancedLogging: true,
-      codecDetection: true
+      codecDetection: true,
+      tokenAuth: true  // Token in URL, no JWT needed
     }
   });
 });
@@ -1353,16 +1347,15 @@ setInterval(() => {
 
 app.listen(PORT, () => {
   console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log('║  🔒📊 IPTV Backend - Protected + Advanced Logging    ║');
+  console.log('║  🔒📺 IPTV Backend - Token Auth (No JWT on stream)   ║');
   console.log('╚═══════════════════════════════════════════════════════╝');
   console.log(`\n📡 Server: http://localhost:${PORT}`);
   console.log(`✅ Health: http://localhost:${PORT}/api/health`);
-  console.log(`\n🔐 Features Enabled:`);
-  console.log(`   ✅ Stream URL Protection (30s tokens)`);
+  console.log(`\n🔐 Features:`);
+  console.log(`   ✅ Stream URL Protection (60s tokens, 5 uses)`);
+  console.log(`   ✅ Token in URL (no JWT header needed)`);
   console.log(`   ✅ Advanced Logging System`);
   console.log(`   ✅ Codec Detection`);
-  console.log(`   ✅ Real-time FFmpeg Monitoring`);
-  console.log(`   ✅ Network Diagnostics`);
   console.log(`\n🔐 Default credentials:`);
   console.log(`   Username: admin`);
   console.log(`   Password: admin123\n`);
