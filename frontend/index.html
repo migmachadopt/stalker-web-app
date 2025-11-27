@@ -82,8 +82,11 @@
       const videoRef = useRef(null);
       const playerRef = useRef(null);
 
-      const addLog = (msg) => { 
-        console.log(msg); 
+      // Silent logging - no sensitive data exposed to browser console
+      const log = {
+        info: () => {}, // Silent in production
+        error: (msg) => console.error('Error:', msg), // Only show user-friendly errors
+        player: () => {} // Silent - player events handled internally
       };
 
       // Apply theme on mount and when changed
@@ -113,25 +116,29 @@
         e.preventDefault(); 
         setError(''); 
         setIsLoggingIn(true);
+        
         try {
           const data = await api.fetch('/auth/login', { 
             method: 'POST', 
             body: JSON.stringify({ username, password }) 
           });
+          
           if (!data.success) throw new Error(data.error || 'Login failed');
+          
           api.setToken(data.token); 
           setUser(data.user); 
-          setIsAuthenticated(true); 
-          addLog(`✅ Logged in as ${data.user.username}`);
+          setIsAuthenticated(true);
+          
           data.user.hasPortalConfig ? connectToIPTV() : setScreen('noconfig');
         } catch (err) { 
+          log.error(err.message);
           setError(err.message); 
         } finally { 
           setIsLoggingIn(false); 
         }
       };
 
-      const handleLogout = () => { 
+      const handleLogout = () => {
         api.setToken(null); 
         setUser(null); 
         setIsAuthenticated(false); 
@@ -140,8 +147,7 @@
         setGroups([]); 
         setCurrentChannel(null); 
         setScreen('login'); 
-        setShowUserMenu(false); 
-        addLog('👋 Logged out'); 
+        setShowUserMenu(false);
       };
 
       const handleChangePassword = async (e) => {
@@ -174,20 +180,25 @@
       const connectToIPTV = async () => {
         setScreen('loading'); 
         setLoadingProgress('Connecting to IPTV...');
+        
         try {
-          addLog('🔄 Connecting to IPTV portal...');
           const connectData = await api.fetch('/iptv/connect', { method: 'POST' });
           if (!connectData.success) throw new Error(connectData.error || 'IPTV connection failed');
-          setIptvSessionId(connectData.sessionId); 
-          addLog('✅ Connected to IPTV!'); 
+          
+          setIptvSessionId(connectData.sessionId);
+          
           setLoadingProgress('Loading channels...');
+          
           const chData = await api.fetch('/iptv/channels', { 
             method: 'POST', 
             body: JSON.stringify({ sessionId: connectData.sessionId }) 
           });
+          
           if (!chData.success) throw new Error(chData.error || 'Failed to load channels');
-          addLog(`✅ Loaded ${chData.channels.length} channels`); 
+          
           setChannels(chData.channels);
+          
+          // Process groups
           const groupMap = {};
           chData.channels.forEach(ch => { 
             const gid = ch.tv_genre_id || 0; 
@@ -197,10 +208,11 @@
             } 
             groupMap[gid].count++; 
           });
-          setGroups(Object.values(groupMap).sort((a, b) => b.count - a.count)); 
+          
+          setGroups(Object.values(groupMap).sort((a, b) => b.count - a.count));
           setScreen('main');
         } catch (err) { 
-          addLog(`❌ Error: ${err.message}`); 
+          log.error(err.message);
           setError(err.message); 
           setScreen('noconfig'); 
         }
@@ -234,9 +246,8 @@
       };
 
       const playChannel = async (channel) => {
-        addLog(`🔄 Playing: ${channel.name}`);
-        addLog(`📋 CMD: ${channel.cmd}`);
         setCurrentChannel(channel);
+        
         try {
           const data = await api.fetch('/iptv/stream', { 
             method: 'POST', 
@@ -247,14 +258,14 @@
               channelName: channel.name 
             }) 
           });
+          
           if (data.success && data.streamUrl) { 
-            addLog(`✅ Stream URL received`); 
             loadStream(data.streamUrl); 
           } else { 
-            addLog(`❌ Failed to get stream`); 
+            log.error('Failed to get stream');
           }
         } catch (err) { 
-          addLog(`❌ Error: ${err.message}`); 
+          log.error(err.message);
         }
       };
 
@@ -262,6 +273,7 @@
         const video = videoRef.current; 
         if (!video) return;
         
+        // Cleanup previous player
         if (playerRef.current) { 
           playerRef.current.destroy?.(); 
           playerRef.current = null; 
@@ -274,13 +286,13 @@
           ? window.location.origin + streamUrl 
           : streamUrl;
         
-        addLog(`📺 Loading: ${absoluteUrl.substring(0, 60)}...`);
-        
+        // Check mpegts.js support
         if (!mpegts || !mpegts.isSupported()) {
-          addLog(`❌ mpegts.js not supported`);
+          log.error('Video playback not supported in this browser');
           return;
         }
         
+        // Create player
         const player = mpegts.createPlayer({ 
           type: 'flv', 
           isLive: true, 
@@ -297,33 +309,27 @@
         player.attachMediaElement(video); 
         player.load();
         
-        addLog(`✅ Player created and loading...`);
-        
+        // Auto-play after buffer
         setTimeout(() => {
-          addLog(`⏯️ Force play attempt...`);
-          addLog(`   readyState: ${video.readyState}`);
-          addLog(`   buffered: ${video.buffered.length}`);
           if (video.readyState >= 1) {
-            video.play().catch(e => addLog(`Play error: ${e.message}`));
+            video.play().catch(() => {
+              // Auto-play blocked - user needs to interact
+            });
           }
         }, 3000);
         
+        // Error handling only
         player.on(mpegts.Events.ERROR, (type, detail) => {
-          addLog(`❌ ERROR: ${type} - ${detail}`);
+          log.error('Playback error');
         });
         
-        player.on(mpegts.Events.MEDIA_INFO, (info) => {
-          addLog(`📊 Media info: ${info.videoCodec}, ${info.audioCodec}`);
-        });
-        
-        video.onloadstart = () => addLog(`🔄 Video loading...`);
-        video.onloadeddata = () => addLog(`✅ Data loaded`);
         video.oncanplay = () => {
-          addLog(`✅ Can play!`);
-          video.play();
+          video.play().catch(() => {});
         };
-        video.onplaying = () => addLog(`▶️ Playing!`);
-        video.onerror = () => addLog(`❌ Video error: ${video.error?.code}`);
+        
+        video.onerror = () => {
+          log.error('Video playback failed');
+        };
         
         playerRef.current = player;
       };
