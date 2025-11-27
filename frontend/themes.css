@@ -424,12 +424,25 @@ body {
   flex-direction: column;
   flex-shrink: 0;
   overflow: hidden;
+  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.sidebar.collapsed {
+  width: 0;
+  border-right: none;
 }
 
 .sidebar-header {
   padding: var(--space-md);
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-secondary);
+}
+
+.sidebar.collapsed .sidebar-header {
+  padding: 0;
+  border-bottom: none;
+  opacity: 0;
+  visibility: hidden;
 }
 
 .sidebar-header-top {
@@ -445,6 +458,28 @@ body {
   color: var(--text-primary);
   text-transform: uppercase;
   letter-spacing: 0.1em;
+}
+
+/* Collapse button */
+.collapse-btn {
+  width: 32px;
+  height: 32px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+
+.collapse-btn:hover {
+  background: var(--bg-elevated);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
 }
 
 /* Search bar */
@@ -753,6 +788,43 @@ body {
   flex-direction: column;
   background: var(--bg-primary);
   position: relative;
+}
+
+/* Floating sidebar toggle button */
+.floating-sidebar-toggle {
+  position: absolute;
+  top: var(--space-md);
+  left: var(--space-md);
+  z-index: 100;
+  width: 48px;
+  height: 48px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  transition: all 0.2s;
+  box-shadow: var(--shadow-lg);
+}
+
+.floating-sidebar-toggle:hover {
+  background: var(--accent-primary);
+  color: var(--bg-primary);
+  border-color: var(--accent-primary);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-xl);
+}
+
+.floating-sidebar-toggle:active {
+  transform: translateY(0);
+}
+
+/* Hide floating button in fullscreen */
+.player-section.fullscreen ~ .floating-sidebar-toggle {
+  display: none;
 }
 
 .player-section {

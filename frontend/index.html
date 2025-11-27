@@ -79,6 +79,7 @@
       const [currentChannel, setCurrentChannel] = useState(null);
       const [isFullscreen, setIsFullscreen] = useState(false);
       const [currentTheme, setCurrentTheme] = useState(localStorage.getItem('theme') || 'midnight');
+      const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
       const videoRef = useRef(null);
       const playerRef = useRef(null);
 
@@ -94,6 +95,20 @@
         document.body.className = `theme-${currentTheme}`;
         localStorage.setItem('theme', currentTheme);
       }, [currentTheme]);
+
+      // Disable mpegts.js logging globally on mount
+      useEffect(() => {
+        if (typeof mpegts !== 'undefined' && mpegts.LoggingControl) {
+          mpegts.LoggingControl.applyConfig({
+            enableAll: false,
+            enableDebug: false,
+            enableVerbose: false,
+            enableInfo: false,
+            enableWarn: false,
+            enableError: false
+          });
+        }
+      }, []);
 
       useEffect(() => { checkAuth(); }, []);
 
@@ -292,6 +307,16 @@
           return;
         }
         
+        // Disable mpegts.js logging globally
+        mpegts.LoggingControl.applyConfig({
+          enableAll: false,
+          enableDebug: false,
+          enableVerbose: false,
+          enableInfo: false,
+          enableWarn: false,
+          enableError: false
+        });
+        
         // Create player
         const player = mpegts.createPlayer({ 
           type: 'flv', 
@@ -303,7 +328,8 @@
           stashInitialSize: 384 * 1024,
           isLive: true,
           lazyLoad: false,
-          autoCleanupSourceBuffer: true
+          autoCleanupSourceBuffer: true,
+          enableLogging: false  // Disable player logging
         });
         
         player.attachMediaElement(video); 
@@ -444,10 +470,19 @@
             </div>
           </div>
 
-          <div className="sidebar">
+          <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
             <div className="sidebar-header">
               <div className="sidebar-header-top">
-                <h2>TV Channels</h2>
+                <div style={{display: 'flex', alignItems: 'center', gap: 'var(--space-sm)'}}>
+                  <button 
+                    className="collapse-btn"
+                    onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+                    title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+                  >
+                    {sidebarCollapsed ? '☰' : '×'}
+                  </button>
+                  <h2>TV Channels</h2>
+                </div>
                 <div className="user-menu">
                   <button 
                     className="user-btn" 
@@ -568,6 +603,17 @@
           </div>
           
           <div className="main-content">
+            {/* Floating sidebar toggle button - only visible when collapsed */}
+            {sidebarCollapsed && (
+              <button 
+                className="floating-sidebar-toggle"
+                onClick={() => setSidebarCollapsed(false)}
+                title="Show sidebar"
+              >
+                ☰
+              </button>
+            )}
+            
             <div className={`player-section ${isFullscreen ? 'fullscreen' : ''}`}>
               {currentChannel ? (
                 <>
