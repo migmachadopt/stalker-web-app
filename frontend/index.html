@@ -233,7 +233,7 @@
         addLog(`📋 CMD: ${channel.cmd}`);
         setCurrentChannel(channel);
         try {
-          const data = await api.fetch('/iptv/stream', { method: 'POST', body: JSON.stringify({ sessionId: iptvSessionId, channelId: channel.id, cmd: channel.cmd }) });
+          const data = await api.fetch('/iptv/stream', { method: 'POST', body: JSON.stringify({ sessionId: iptvSessionId, channelId: channel.id, cmd: channel.cmd, channelName: channel.name }) });
           if (data.success && data.streamUrl) { addLog(`✅ Stream URL received`); loadStream(data.streamUrl); } else { addLog(`❌ Failed to get stream`); }
         } catch (err) { addLog(`❌ Error: ${err.message}`); }
       };
