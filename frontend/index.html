@@ -66,6 +66,7 @@
       const [isLoggingIn, setIsLoggingIn] = useState(false);
       const [showUserMenu, setShowUserMenu] = useState(false);
       const [showChangePassword, setShowChangePassword] = useState(false);
+      const [showPreferences, setShowPreferences] = useState(false);
       const [currentPassword, setCurrentPassword] = useState('');
       const [newPassword, setNewPassword] = useState('');
       const [confirmPassword, setConfirmPassword] = useState('');
@@ -80,12 +81,8 @@
       const [currentTheme, setCurrentTheme] = useState(localStorage.getItem('theme') || 'midnight');
       const videoRef = useRef(null);
       const playerRef = useRef(null);
-      const [debugLog, setDebugLog] = useState([]);
-      const [debugVisible, setDebugVisible] = useState(false);
 
       const addLog = (msg) => { 
-        const time = new Date().toLocaleTimeString(); 
-        setDebugLog(prev => [...prev.slice(-50), `[${time}] ${msg}`]); 
         console.log(msg); 
       };
 
@@ -364,28 +361,6 @@
           <div className="login-card">
             <h1>📺 IPTV Player</h1>
             <p className="subtitle">Sign in to continue</p>
-            
-            {/* Theme Selector */}
-            <div className="theme-selector">
-              <button 
-                className={`theme-option ${currentTheme === 'midnight' ? 'active' : ''}`}
-                onClick={() => setCurrentTheme('midnight')}
-              >
-                🌙 Midnight
-              </button>
-              <button 
-                className={`theme-option ${currentTheme === 'carbon' ? 'active' : ''}`}
-                onClick={() => setCurrentTheme('carbon')}
-              >
-                🖤 Carbon
-              </button>
-              <button 
-                className={`theme-option ${currentTheme === 'ocean' ? 'active' : ''}`}
-                onClick={() => setCurrentTheme('ocean')}
-              >
-                🌊 Ocean
-              </button>
-            </div>
 
             {error && <div className="error-msg">{error}</div>}
             
@@ -476,6 +451,15 @@
                   </button>
                   {showUserMenu && (
                     <div className="user-dropdown">
+                      <div 
+                        className="user-dropdown-item" 
+                        onClick={() => { 
+                          setShowPreferences(true); 
+                          setShowUserMenu(false); 
+                        }}
+                      >
+                        🎨 Preferences
+                      </div>
                       <div 
                         className="user-dropdown-item" 
                         onClick={() => { 
@@ -613,6 +597,55 @@
             </div>
           </div>
           
+          {/* Preferences Modal */}
+          {showPreferences && (
+            <div className="modal-overlay" onClick={() => setShowPreferences(false)}>
+              <div className="modal" onClick={e => e.stopPropagation()}>
+                <h2>🎨 Preferences</h2>
+                
+                <div className="form-group">
+                  <label>Theme</label>
+                  <p style={{fontSize: '0.8125rem', color: 'var(--text-tertiary)', marginBottom: 'var(--space-md)'}}>
+                    Choose your preferred color theme
+                  </p>
+                  
+                  <div className="theme-selector">
+                    <button 
+                      className={`theme-option ${currentTheme === 'midnight' ? 'active' : ''}`}
+                      onClick={() => setCurrentTheme('midnight')}
+                      type="button"
+                    >
+                      🌙 Midnight
+                    </button>
+                    <button 
+                      className={`theme-option ${currentTheme === 'carbon' ? 'active' : ''}`}
+                      onClick={() => setCurrentTheme('carbon')}
+                      type="button"
+                    >
+                      🖤 Carbon
+                    </button>
+                    <button 
+                      className={`theme-option ${currentTheme === 'ocean' ? 'active' : ''}`}
+                      onClick={() => setCurrentTheme('ocean')}
+                      type="button"
+                    >
+                      🌊 Ocean
+                    </button>
+                  </div>
+                </div>
+
+                <button 
+                  type="button" 
+                  className="btn btn-secondary" 
+                  onClick={() => setShowPreferences(false)}
+                  style={{marginTop: 'var(--space-md)'}}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Change Password Modal */}
           {showChangePassword && (
             <div className="modal-overlay" onClick={() => setShowChangePassword(false)}>
@@ -662,30 +695,6 @@
             </div>
           )}
           
-          {/* Debug Panel */}
-          <div className="debug-panel">
-            <div className="debug-header" onClick={() => setDebugVisible(!debugVisible)}>
-              <h4>🔧 Debug Log ({debugLog.length})</h4>
-              <span>{debugVisible ? '▼' : '▲'}</span>
-            </div>
-            {debugVisible && (
-              <>
-                <div className="debug-controls">
-                  <button onClick={() => navigator.clipboard.writeText(debugLog.join('\n'))}>
-                    📋 Copy
-                  </button>
-                  <button onClick={() => setDebugLog([])}>
-                    🗑️ Clear
-                  </button>
-                </div>
-                <div className="debug-content">
-                  {debugLog.map((log, i) => (
-                    <div key={i}>{log}</div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
         </div>
       );
     }
