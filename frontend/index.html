@@ -564,13 +564,19 @@
                 {/* Channels Panel */}
                 <div className="slide-panel">
                   <div className="channels-panel">
-                    <button className="back-button" onClick={handleBackToGroups}>
-                      ← Back to Groups
-                    </button>
                     {selectedGroupInfo && (
                       <div className="channels-panel-header">
-                        <h3>{selectedGroupInfo.icon} {selectedGroupInfo.name}</h3>
-                        <span>{groupChannels.length} channels</span>
+                        <button 
+                          className="back-arrow-btn" 
+                          onClick={handleBackToGroups}
+                          title="Back to groups"
+                        >
+                          ←
+                        </button>
+                        <div className="channel-header-info">
+                          <h3>{selectedGroupInfo.icon} {selectedGroupInfo.name}</h3>
+                          <span>{groupChannels.length} channels</span>
+                        </div>
                       </div>
                     )}
                     <div className="channels-list">

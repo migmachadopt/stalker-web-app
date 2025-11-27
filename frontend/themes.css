@@ -433,7 +433,7 @@ body {
 }
 
 .sidebar-header {
-  padding: var(--space-md);
+  padding: 12px var(--space-md);
   border-bottom: 1px solid var(--border-primary);
   background: var(--bg-secondary);
 }
@@ -449,7 +449,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--space-md);
+  margin-bottom: 12px;
 }
 
 .sidebar-header h2 {
@@ -603,14 +603,14 @@ body {
 
 /* Groups */
 .groups-panel {
-  padding: var(--space-sm);
+  padding: 8px;
 }
 
 .group-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px var(--space-md);
+  padding: 10px 12px;
   margin-bottom: 2px;
   background: var(--bg-tertiary);
   cursor: pointer;
@@ -627,19 +627,19 @@ body {
 .group-item .group-info {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex: 1;
 }
 
 .group-item .group-icon {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: var(--accent-subtle);
   color: var(--accent-primary);
-  font-size: 1rem;
+  font-size: 0.95rem;
 }
 
 .group-item .name {
@@ -649,7 +649,7 @@ body {
 }
 
 .group-item .count {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--text-tertiary);
   background: var(--bg-input);
   padding: 2px 8px;
@@ -664,39 +664,50 @@ body {
   height: 100%;
 }
 
-.back-button {
+.channels-panel-header {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
+  gap: 12px;
   padding: 12px var(--space-md);
   background: var(--bg-tertiary);
-  border: none;
   border-bottom: 1px solid var(--border-primary);
-  color: var(--text-secondary);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
 }
 
-.back-button:hover {
+.back-arrow-btn {
+  width: 32px;
+  height: 32px;
   background: var(--bg-elevated);
-  color: var(--text-primary);
+  border: 1px solid var(--border-secondary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.25rem;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  padding: 0;
 }
 
-.channels-panel-header {
-  padding: var(--space-md);
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-primary);
+.back-arrow-btn:hover {
+  background: var(--accent-primary);
+  color: var(--bg-primary);
+  border-color: var(--accent-primary);
+}
+
+.channel-header-info {
+  flex: 1;
+  min-width: 0;
 }
 
 .channels-panel-header h3 {
   font-size: 0.875rem;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 4px;
+  margin-bottom: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .channels-panel-header span {
@@ -708,14 +719,14 @@ body {
 .channels-list {
   flex: 1;
   overflow-y: auto;
-  padding: var(--space-sm);
+  padding: 8px;
 }
 
 .channel-item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
+  gap: 10px;
+  padding: 8px 10px;
   margin-bottom: 2px;
   background: var(--bg-tertiary);
   cursor: pointer;
@@ -738,8 +749,8 @@ body {
 }
 
 .channel-item .channel-logo {
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   object-fit: contain;
   background: var(--bg-input);
   flex-shrink: 0;
@@ -757,10 +768,11 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.3;
 }
 
 .channel-item .channel-number {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   color: var(--text-tertiary);
   font-family: 'Courier New', monospace;
   margin-top: 2px;
