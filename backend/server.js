@@ -32,95 +32,238 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 📊 ADVANCED LOGGING SYSTEM
+// 📊 PROFESSIONAL LOGGING SYSTEM
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const streamLogs = new Map(); // sessionId -> logs array
+class Logger {
+  constructor() {
+    this.sessions = new Map();
+  }
 
-class StreamLogger {
-  constructor(sessionId, channelName) {
-    this.sessionId = sessionId;
-    this.channelName = channelName;
-    this.logs = [];
-    this.startTime = Date.now();
-    this.metadata = {
-      channel: channelName,
-      startedAt: new Date().toISOString(),
-      userId: null
-    };
-    
-    // Store in global map
-    streamLogs.set(sessionId, this);
+  // Format timestamp
+  timestamp() {
+    return new Date().toISOString().replace('T', ' ').substring(0, 19);
   }
-  
+
+  // Core log method
   log(level, category, message, data = {}) {
-    const entry = {
-      timestamp: new Date().toISOString(),
-      elapsed: Date.now() - this.startTime,
-      level,      // info, warn, error, success
-      category,   // stream, ffmpeg, network, codec, player
-      message,
-      data
-    };
+    const ts = this.timestamp();
+    const dataStr = Object.keys(data).length > 0 
+      ? ' | ' + Object.entries(data).map(([k, v]) => `${k}=${v}`).join(' ')
+      : '';
     
-    this.logs.push(entry);
-    
-    // Console output with colors
-    const icons = {
-      info: 'ℹ️',
-      warn: '⚠️',
-      error: '❌',
-      success: '✅',
-      debug: '🔍'
-    };
-    
-    const icon = icons[level] || '📝';
-    console.log(`${icon} [${category.toUpperCase()}] ${message}`, data);
-    
-    // Keep only last 100 logs per session
-    if (this.logs.length > 100) {
-      this.logs = this.logs.slice(-100);
-    }
+    console.log(`[${ts}] [${level.toUpperCase()}] [${category}] ${message}${dataStr}`);
   }
-  
+
+  // Level methods
   info(category, message, data) { this.log('info', category, message, data); }
   warn(category, message, data) { this.log('warn', category, message, data); }
   error(category, message, data) { this.log('error', category, message, data); }
-  success(category, message, data) { this.log('success', category, message, data); }
   debug(category, message, data) { this.log('debug', category, message, data); }
-  
-  setMetadata(key, value) {
-    this.metadata[key] = value;
-  }
-  
-  getFullReport() {
-    return {
-      sessionId: this.sessionId,
-      metadata: this.metadata,
-      duration: Date.now() - this.startTime,
-      logs: this.logs
+
+  // Stream session tracking
+  createStreamSession(sessionId, userId, username, channelId, channelName) {
+    const session = {
+      sessionId,
+      userId,
+      username,
+      channelId,
+      channelName,
+      startTime: Date.now(),
+      streamUrl: null,
+      streamType: null,
+      videoCodec: null,
+      audioCodec: null,
+      resolution: null,
+      bitrate: null,
+      status: 'initializing'
     };
+    
+    this.sessions.set(sessionId, session);
+    
+    this.info('stream', `Stream session created`, {
+      sessionId: sessionId.substring(0, 8),
+      user: username,
+      channel: channelName
+    });
+    
+    return session;
   }
-}
 
-// Get or create logger for session
-function getLogger(sessionId, channelName = 'Unknown') {
-  if (!streamLogs.has(sessionId)) {
-    return new StreamLogger(sessionId, channelName);
-  }
-  return streamLogs.get(sessionId);
-}
-
-// Cleanup old logs
-setInterval(() => {
-  const now = Date.now();
-  const maxAge = 60 * 60 * 1000; // 1 hour
-  
-  for (const [sessionId, logger] of streamLogs.entries()) {
-    if (now - logger.startTime > maxAge) {
-      streamLogs.delete(sessionId);
+  updateStreamSession(sessionId, updates) {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      Object.assign(session, updates);
     }
   }
+
+  getStreamSession(sessionId) {
+    return this.sessions.get(sessionId);
+  }
+
+  logStreamEvent(sessionId, event, data = {}) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    const elapsed = Math.round((Date.now() - session.startTime) / 1000);
+    
+    this.info('stream', `${event}`, {
+      sessionId: sessionId.substring(0, 8),
+      user: session.username,
+      channel: session.channelName,
+      elapsed: `${elapsed}s`,
+      ...data
+    });
+  }
+
+  // User activity logging
+  logUserActivity(username, action, details = {}) {
+    this.info('user', `${username} - ${action}`, details);
+  }
+
+  // Auth logging
+  logAuth(event, username, ip, success = true) {
+    const level = success ? 'info' : 'warn';
+    this.log(level, 'auth', `${event} - ${username}`, { ip, success });
+  }
+
+  // IPTV connection logging
+  logIPTVConnection(username, portalUrl, status, details = {}) {
+    this.info('iptv', `${username} - ${status}`, { portal: portalUrl, ...details });
+  }
+
+  // FFmpeg logging with codec detection
+  parseFFmpegOutput(sessionId, line) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+
+    // Input stream detection
+    if (line.includes('Input #0')) {
+      this.logStreamEvent(sessionId, 'Input stream detected');
+    }
+
+    // Duration
+    if (line.includes('Duration:')) {
+      const match = line.match(/Duration: ([\d:.]+)/);
+      if (match) {
+        this.updateStreamSession(sessionId, { duration: match[1] });
+      }
+    }
+
+    // Video codec
+    if (line.includes('Stream #0') && line.includes('Video:')) {
+      const codecMatch = line.match(/Video: ([^,]+)/);
+      const resMatch = line.match(/(\d+x\d+)/);
+      const fpsMatch = line.match(/([\d.]+) fps/);
+      const bitrateMatch = line.match(/([\d.]+) kb\/s/);
+
+      const videoInfo = {
+        codec: codecMatch ? codecMatch[1].trim() : 'unknown',
+        resolution: resMatch ? resMatch[1] : 'unknown',
+        fps: fpsMatch ? fpsMatch[1] : 'unknown',
+        bitrate: bitrateMatch ? bitrateMatch[1] + 'kbps' : 'unknown'
+      };
+
+      this.updateStreamSession(sessionId, {
+        videoCodec: videoInfo.codec,
+        resolution: videoInfo.resolution,
+        status: 'video_detected'
+      });
+
+      this.logStreamEvent(sessionId, 'Video codec detected', {
+        codec: videoInfo.codec,
+        resolution: videoInfo.resolution,
+        fps: videoInfo.fps,
+        bitrate: videoInfo.bitrate
+      });
+    }
+
+    // Audio codec
+    if (line.includes('Stream #0') && line.includes('Audio:')) {
+      const codecMatch = line.match(/Audio: ([^,]+)/);
+      const sampleMatch = line.match(/(\d+) Hz/);
+      const channelsMatch = line.match(/(mono|stereo|\d+ channels)/);
+      const bitrateMatch = line.match(/([\d.]+) kb\/s/);
+
+      const audioInfo = {
+        codec: codecMatch ? codecMatch[1].trim() : 'unknown',
+        sampleRate: sampleMatch ? sampleMatch[1] + 'Hz' : 'unknown',
+        channels: channelsMatch ? channelsMatch[1] : 'unknown',
+        bitrate: bitrateMatch ? bitrateMatch[1] + 'kbps' : 'unknown'
+      };
+
+      this.updateStreamSession(sessionId, {
+        audioCodec: audioInfo.codec,
+        status: 'audio_detected'
+      });
+
+      this.logStreamEvent(sessionId, 'Audio codec detected', {
+        codec: audioInfo.codec,
+        sampleRate: audioInfo.sampleRate,
+        channels: audioInfo.channels,
+        bitrate: audioInfo.bitrate
+      });
+    }
+
+    // Output started
+    if (line.includes('Output #0')) {
+      this.updateStreamSession(sessionId, { status: 'encoding_started' });
+      this.logStreamEvent(sessionId, 'Output encoding started');
+    }
+
+    // Encoding started (first frame)
+    if (line.includes('frame=') && line.includes('fps=')) {
+      if (session.status !== 'streaming') {
+        this.updateStreamSession(sessionId, { status: 'streaming' });
+        this.logStreamEvent(sessionId, 'Stream is LIVE');
+      }
+    }
+
+    // Errors
+    if (line.toLowerCase().includes('error') && !line.includes('Errorlog')) {
+      this.logStreamEvent(sessionId, 'FFmpeg error', { error: line.trim() });
+    }
+  }
+
+  // Cleanup old sessions
+  cleanupOldSessions() {
+    const now = Date.now();
+    const maxAge = 60 * 60 * 1000; // 1 hour
+
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (now - session.startTime > maxAge) {
+        this.info('stream', 'Session expired and cleaned up', {
+          sessionId: sessionId.substring(0, 8),
+          user: session.username,
+          duration: Math.round((now - session.startTime) / 1000) + 's'
+        });
+        this.sessions.delete(sessionId);
+      }
+    }
+  }
+
+  // Get active sessions summary
+  getActiveSessions() {
+    const sessions = [];
+    for (const [sessionId, session] of this.sessions.entries()) {
+      sessions.push({
+        sessionId: sessionId.substring(0, 8),
+        user: session.username,
+        channel: session.channelName,
+        duration: Math.round((Date.now() - session.startTime) / 1000),
+        status: session.status,
+        codec: session.videoCodec || 'unknown'
+      });
+    }
+    return sessions;
+  }
+}
+
+const logger = new Logger();
+
+// Periodic cleanup
+setInterval(() => {
+  logger.cleanupOldSessions();
 }, 5 * 60 * 1000);
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -129,11 +272,10 @@ setInterval(() => {
 
 const streamTokens = new Map();
 
-function generateStreamToken(userId, streamUrl, channelInfo) {
+function generateStreamToken(userId, streamUrl, channelInfo, username) {
   const tokenId = crypto.randomBytes(16).toString('hex');
-  const expiresAt = Date.now() + 60000; // 60 segundos (aumentado de 30)
+  const expiresAt = Date.now() + 60000; // 60 seconds
   
-  // Encriptar URL
   const iv = crypto.randomBytes(16);
   const cipher = crypto.createCipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
   let encrypted = cipher.update(streamUrl, 'utf8', 'hex');
@@ -141,17 +283,29 @@ function generateStreamToken(userId, streamUrl, channelInfo) {
   
   streamTokens.set(tokenId, {
     userId,
+    username,
     encryptedUrl: encrypted,
     iv: iv.toString('hex'),
     expiresAt,
     usedCount: 0,
-    maxUses: 5, // Aumentado para permitir reconnects
-    channelInfo
+    maxUses: 5,
+    channelInfo,
+    createdAt: Date.now()
   });
   
-  // Auto-cleanup
+  logger.info('token', 'Stream token generated', {
+    tokenId: tokenId.substring(0, 8),
+    user: username,
+    channel: channelInfo.name,
+    expiresIn: '60s'
+  });
+  
   setTimeout(() => {
-    streamTokens.delete(tokenId);
+    if (streamTokens.delete(tokenId)) {
+      logger.debug('token', 'Token expired and removed', {
+        tokenId: tokenId.substring(0, 8)
+      });
+    }
   }, 70000);
   
   return tokenId;
@@ -263,7 +417,7 @@ function loadUsers() {
     const decrypted = decrypt(encryptedData);
     return JSON.parse(decrypted);
   } catch (error) {
-    console.error('Error loading users:', error.message);
+    logger.error('data', 'Error loading users', { error: error.message });
     const defaultUsers = createDefaultAdmin();
     saveUsers(defaultUsers);
     return defaultUsers;
@@ -382,11 +536,13 @@ app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
     
     if (!user || !user.isActive) {
       recordLoginAttempt(ip, username, false);
+      logger.logAuth('Login failed', username, ip, false);
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
     
     if (!verifyPassword(password, user.passwordSalt, user.passwordHash)) {
       recordLoginAttempt(ip, username, false);
+      logger.logAuth('Login failed - wrong password', username, ip, false);
       return res.status(401).json({ success: false, error: 'Invalid credentials' });
     }
     
@@ -397,7 +553,8 @@ app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
     
     const token = generateAuthToken(user.id, user.role);
     
-    console.log(`✅ User logged in: ${username} (${user.role})`);
+    logger.logAuth('Login successful', username, ip, true);
+    logger.logUserActivity(username, 'logged in', { role: user.role });
     
     res.json({
       success: true,
@@ -411,7 +568,7 @@ app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
     });
     
   } catch (error) {
-    console.error('Login error:', error);
+    logger.error('auth', 'Login error', { error: error.message });
     res.status(500).json({ success: false, error: 'Login failed' });
   }
 });
@@ -472,7 +629,7 @@ app.post('/api/auth/change-password', authMiddleware, (req, res) => {
     
     saveUsers(data);
     
-    console.log(`🔐 Password changed for user: ${user.username}`);
+    logger.logUserActivity(user.username, 'changed password');
     
     res.json({ success: true, message: 'Password changed successfully' });
     
@@ -549,7 +706,7 @@ app.post('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
     data.users.push(newUser);
     saveUsers(data);
     
-    console.log(`👤 New user created: ${username}`);
+    logger.logUserActivity('admin', `created user ${username}`, { role: newUser.role });
     
     res.json({
       success: true,
@@ -611,7 +768,7 @@ app.put('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
     user.updatedAt = new Date().toISOString();
     saveUsers(data);
     
-    console.log(`✏️ User updated: ${user.username}`);
+    logger.logUserActivity('admin', `updated user ${user.username}`);
     
     res.json({
       success: true,
@@ -656,7 +813,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
     data.users.splice(userIndex, 1);
     saveUsers(data);
     
-    console.log(`🗑️ User deleted: ${user.username}`);
+    logger.logUserActivity('admin', `deleted user ${user.username}`);
     
     res.json({ success: true, message: 'User deleted successfully' });
     
@@ -719,8 +876,8 @@ function getStalkerHeaders(token = '', macAddress = '') {
   return headers;
 }
 
-async function discoverPortalPath(baseUrl, macAddress) {
-  console.log(`\n🔍 Discovering portal path for: ${baseUrl}`);
+async function discoverPortalPath(baseUrl, macAddress, username) {
+  logger.info('iptv', `${username} - Discovering portal path`, { baseUrl });
   
   const possiblePaths = [
     '/portal.php',
@@ -734,8 +891,6 @@ async function discoverPortalPath(baseUrl, macAddress) {
   for (const path of possiblePaths) {
     const testUrl = `${baseUrl}${path}?type=stb&action=handshake&token=&JsHttpRequest=1-xml`;
     
-    console.log(`   🧪 Testing: ${baseUrl}${path}`);
-    
     try {
       const response = await axios.get(testUrl, {
         headers: getStalkerHeaders('', macAddress),
@@ -745,7 +900,7 @@ async function discoverPortalPath(baseUrl, macAddress) {
       });
 
       if (response.status === 200 && response.data?.js?.token) {
-        console.log(`   ✅ Found working path: ${path || '(root)'}`);
+        logger.info('iptv', `${username} - Portal path discovered`, { path: path || '(root)' });
         return {
           path,
           fullUrl: `${baseUrl}${path}`,
@@ -754,7 +909,7 @@ async function discoverPortalPath(baseUrl, macAddress) {
         };
       }
     } catch (error) {
-      console.log(`   ❌ Failed: ${error.message}`);
+      // Silent fail, try next path
     }
   }
 
@@ -777,11 +932,7 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
       });
     }
 
-    console.log('\n╔════════════════════════════════════════════════════════╗');
-    console.log('║            IPTV CONNECTION REQUEST                     ║');
-    console.log('╚════════════════════════════════════════════════════════╝');
-    console.log(`👤 User: ${user.username}`);
-    console.log(`📍 Portal: ${user.portalUrl}`);
+    logger.logIPTVConnection(user.username, user.portalUrl, 'connecting');
 
     let baseUrl = user.portalUrl
       .replace(/\/$/, '')
@@ -808,9 +959,10 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
       }
     }
 
-    const discovery = await discoverPortalPath(baseUrl, user.macAddress);
+    const discovery = await discoverPortalPath(baseUrl, user.macAddress, user.username);
 
     if (!discovery) {
+      logger.logIPTVConnection(user.username, baseUrl, 'failed', { error: 'discovery_failed' });
       return res.status(500).json({
         success: false,
         error: 'Could not connect to IPTV portal'
@@ -825,10 +977,11 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
       macAddress: user.macAddress,
       token: discovery.token,
       userId: user.id,
+      username: user.username,
       createdAt: Date.now(),
     });
 
-    console.log(`✅ IPTV Connected for user: ${user.username}`);
+    logger.logIPTVConnection(user.username, baseUrl, 'connected', { sessionId: sessionId.substring(0, 8) });
 
     res.json({
       success: true,
@@ -837,7 +990,7 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ IPTV Connection Error:', error.message);
+    logger.error('iptv', 'Connection error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to connect to IPTV' });
   }
 });
@@ -856,7 +1009,8 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Session access denied' });
     }
     
-    console.log(`🔄 Getting profile...`);
+    logger.logUserActivity(session.username, 'fetching channels');
+    
     await axios.get(`${session.portalUrl}?type=stb&action=get_profile&JsHttpRequest=1-xml`, {
       headers: getStalkerHeaders(session.token, session.macAddress),
       timeout: 15000,
@@ -865,7 +1019,6 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
     let allChannels = [];
     let page = 1;
     let totalItems = 0;
-    let hasMorePages = true;
     
     const firstResponse = await axios.get(
       `${session.portalUrl}?type=itv&action=get_ordered_list&genre=*&force_ch_link_check=&fav=0&sortby=number&hd=0&p=${page}&JsHttpRequest=1-xml`,
@@ -875,9 +1028,14 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
     totalItems = firstResponse.data?.js?.total_items || 0;
     allChannels = firstResponse.data?.js?.data || [];
     
-    console.log(`📊 Total available: ${totalItems}, got ${allChannels.length} on page 1`);
+    logger.info('iptv', `${session.username} - Loading channels`, { 
+      total: totalItems,
+      loaded: allChannels.length,
+      page: 1
+    });
     
     page = 2;
+    let hasMorePages = true;
     while (hasMorePages && allChannels.length < totalItems && page <= 100) {
       try {
         const pageResponse = await axios.get(
@@ -897,7 +1055,10 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
       }
     }
     
-    console.log(`✅ Total channels loaded: ${allChannels.length}`);
+    logger.info('iptv', `${session.username} - Channels loaded`, { 
+      total: totalItems,
+      loaded: allChannels.length
+    });
 
     res.json({
       success: true,
@@ -916,7 +1077,7 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Channels Error:', error.message);
+    logger.error('iptv', 'Channels fetch error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to fetch channels' });
   }
 });
@@ -939,14 +1100,7 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Session access denied' });
     }
     
-    // Create logger for this stream
-    const logSessionId = `${sessionId}_${channelId}`;
-    const logger = getLogger(logSessionId, channelName || 'Unknown Channel');
-    logger.setMetadata('userId', req.user.userId);
-    logger.setMetadata('channelId', channelId);
-    
-    logger.info('stream', `Requesting stream for: ${channelName || 'Unknown'}`);
-    logger.debug('stream', 'CMD received', { cmd: cmd ? cmd.substring(0, 100) + '...' : 'N/A' });
+    logger.logUserActivity(session.username, 'requesting stream', { channel: channelName });
     
     const response = await axios.get(
       `${session.portalUrl}?type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&JsHttpRequest=1-xml`,
@@ -959,83 +1113,74 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       streamUrl = streamUrl.replace(/^ffmpeg\s+/i, '').replace(/^ffmpeg:/i, '').trim();
     }
     
-    logger.success('stream', 'Stream URL obtained from portal');
-    logger.debug('network', 'URL preview', { preview: streamUrl.substring(0, 80) + '...' });
-    
-    // Detect stream type
     const urlLower = streamUrl.toLowerCase();
     let streamType = 'unknown';
     if (urlLower.includes('.m3u8')) streamType = 'HLS';
     else if (urlLower.includes('.mpd')) streamType = 'DASH';
     else if (urlLower.includes('.ts')) streamType = 'MPEG-TS';
     else if (urlLower.includes('.flv')) streamType = 'FLV';
-    else if (urlLower.includes('http')) streamType = 'HTTP Stream';
+    else if (urlLower.includes('http')) streamType = 'HTTP';
     
-    logger.info('stream', `Stream type: ${streamType}`);
-    
-    // Generate protected token
     const channelInfo = {
       id: channelId,
       name: channelName || 'Unknown',
       type: streamType
     };
     
-    const streamToken = generateStreamToken(req.user.userId, streamUrl, channelInfo);
+    const streamToken = generateStreamToken(req.user.userId, streamUrl, channelInfo, session.username);
     const proxyUrl = `/api/stream/${streamToken}`;
     
-    logger.success('stream', `Protected token generated: ${streamToken}`);
-    logger.setMetadata('streamToken', streamToken);
+    logger.info('stream', `${session.username} - Stream URL generated`, {
+      channel: channelName,
+      type: streamType,
+      tokenId: streamToken.substring(0, 8)
+    });
 
     res.json({
       success: true,
       streamUrl: proxyUrl,
-      logSessionId,  // Para o frontend poder pedir logs
       channelId,
       streamType
     });
 
   } catch (error) {
-    console.error('❌ Stream Error:', error.message);
+    logger.error('stream', 'Stream request error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to get stream' });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// 🔄 PROTECTED PROXY WITHOUT AUTH MIDDLEWARE (token in URL is the auth)
+// 🔄 PROTECTED PROXY
 // ═══════════════════════════════════════════════════════════════════════════════
 
 app.get('/api/stream/:tokenId', async (req, res) => {
   const { tokenId } = req.params;
-  let logger = null;
   let ffmpegProcess = null;
+  let streamSessionId = null;
   
   try {
-    // Get token from Map
     const token = streamTokens.get(tokenId);
     
     if (!token) {
-      console.log(`❌ Token not found: ${tokenId}`);
-      return res.status(401).send('Unauthorized - Token not found or expired');
+      logger.warn('token', 'Token not found or expired', { tokenId: tokenId.substring(0, 8) });
+      return res.status(401).send('Unauthorized');
     }
     
-    // Check expiry
     if (Date.now() > token.expiresAt) {
       streamTokens.delete(tokenId);
-      console.log(`❌ Token expired: ${tokenId}`);
-      return res.status(401).send('Unauthorized - Token expired');
+      logger.warn('token', 'Token expired', { tokenId: tokenId.substring(0, 8) });
+      return res.status(401).send('Unauthorized');
     }
     
-    // Check usage count
     if (token.usedCount >= token.maxUses) {
-      console.log(`⚠️ Token max uses reached: ${tokenId} (${token.usedCount}/${token.maxUses})`);
-      // Don't delete yet - allow reconnects
-      // streamTokens.delete(tokenId);
+      logger.warn('token', 'Token max uses reached', { 
+        tokenId: tokenId.substring(0, 8),
+        uses: `${token.usedCount}/${token.maxUses}`
+      });
     }
     
-    // Increment usage
     token.usedCount++;
     
-    // Decrypt URL
     const iv = Buffer.from(token.iv, 'hex');
     const decipher = crypto.createDecipheriv('aes-256-cbc', Buffer.from(STREAM_SECRET.substring(0, 32)), iv);
     let streamUrl = decipher.update(token.encryptedUrl, 'hex', 'utf8');
@@ -1043,18 +1188,22 @@ app.get('/api/stream/:tokenId', async (req, res) => {
     
     const channelInfo = token.channelInfo;
     
-    console.log(`✅ Token validated: ${tokenId} (usage: ${token.usedCount}/${token.maxUses})`);
-    console.log(`📺 Channel: ${channelInfo.name}`);
+    // Create stream session
+    streamSessionId = `${tokenId}_${Date.now()}`;
+    const streamSession = logger.createStreamSession(
+      streamSessionId,
+      token.userId,
+      token.username,
+      channelInfo.id,
+      channelInfo.name
+    );
     
-    // Get or create logger
-    logger = streamLogs.get(tokenId) || new StreamLogger(tokenId, channelInfo.name);
-    
-    logger.info('proxy', `Stream request validated for: ${channelInfo.name}`);
-    logger.debug('proxy', 'Original URL length', { length: streamUrl.length });
+    logger.updateStreamSession(streamSessionId, {
+      streamUrl: streamUrl.substring(0, 60) + '...',
+      streamType: channelInfo.type
+    });
     
     // Test URL accessibility
-    logger.info('network', 'Testing source URL accessibility...');
-    
     try {
       const testResponse = await axios.head(streamUrl, {
         timeout: 5000,
@@ -1062,27 +1211,20 @@ app.get('/api/stream/:tokenId', async (req, res) => {
         validateStatus: (status) => status < 500
       });
       
-      logger.success('network', `Source accessible - HTTP ${testResponse.status}`);
-      logger.debug('network', 'Response headers', {
-        contentType: testResponse.headers['content-type'],
-        contentLength: testResponse.headers['content-length'],
-        server: testResponse.headers['server']
+      logger.logStreamEvent(streamSessionId, 'Source accessible', {
+        status: testResponse.status,
+        contentType: testResponse.headers['content-type']
       });
       
     } catch (testError) {
-      logger.error('network', `Source not accessible: ${testError.message}`);
+      logger.logStreamEvent(streamSessionId, 'Source not accessible', {
+        error: testError.message
+      });
       return res.status(502).send('Source unavailable');
     }
     
-    // Start FFmpeg with detailed logging
-    logger.info('ffmpeg', 'Starting FFmpeg transcoding process');
-    logger.debug('ffmpeg', 'FFmpeg arguments', {
-      input: streamUrl.substring(0, 60) + '...',
-      videoCodec: 'libx264',
-      preset: 'ultrafast',
-      audioCodec: 'aac',
-      output: 'FLV'
-    });
+    // Start FFmpeg
+    logger.logStreamEvent(streamSessionId, 'Starting FFmpeg transcoding');
     
     ffmpegProcess = spawn('ffmpeg', [
       '-user_agent', 'Lavf/56.40.101',
@@ -1104,111 +1246,17 @@ app.get('/api/stream/:tokenId', async (req, res) => {
     
     // FFmpeg stderr parsing
     let ffmpegStarted = false;
-    let inputDetected = false;
-    let outputStarted = false;
     
     ffmpegProcess.stderr.on('data', (data) => {
       const lines = data.toString().split('\n');
-      
       lines.forEach(line => {
         line = line.trim();
         if (!line) return;
+        logger.parseFFmpegOutput(streamSessionId, line);
         
-        // Input stream detection
-        if (line.includes('Input #0')) {
-          inputDetected = true;
-          logger.success('ffmpeg', 'Input stream detected');
-        }
-        
-        // Input format
-        if (inputDetected && line.includes('from \'')) {
-          const match = line.match(/from '([^']+)'/);
-          if (match) {
-            logger.info('ffmpeg', `Input format: ${match[1]}`);
-          }
-        }
-        
-        // Duration
-        if (line.includes('Duration:')) {
-          const match = line.match(/Duration: ([\d:.]+)/);
-          if (match) {
-            logger.debug('ffmpeg', `Duration: ${match[1]}`);
-          }
-        }
-        
-        // Video codec detection
-        if (line.includes('Stream #0') && line.includes('Video:')) {
-          const codecMatch = line.match(/Video: ([^,]+)/);
-          const resMatch = line.match(/(\d+x\d+)/);
-          const fpsMatch = line.match(/([\d.]+) fps/);
-          const bitrateMatch = line.match(/([\d.]+) kb\/s/);
-          
-          const videoInfo = {
-            codec: codecMatch ? codecMatch[1].trim() : 'unknown',
-            resolution: resMatch ? resMatch[1] : 'unknown',
-            fps: fpsMatch ? fpsMatch[1] : 'unknown',
-            bitrate: bitrateMatch ? bitrateMatch[1] + ' kb/s' : 'unknown'
-          };
-          
-          logger.success('codec', `Video: ${videoInfo.codec} ${videoInfo.resolution} @ ${videoInfo.fps}fps`);
-          logger.debug('codec', 'Video details', videoInfo);
-          logger.setMetadata('videoCodec', videoInfo);
-        }
-        
-        // Audio codec detection
-        if (line.includes('Stream #0') && line.includes('Audio:')) {
-          const codecMatch = line.match(/Audio: ([^,]+)/);
-          const sampleMatch = line.match(/(\d+) Hz/);
-          const channelsMatch = line.match(/(mono|stereo|\d+ channels)/);
-          const bitrateMatch = line.match(/([\d.]+) kb\/s/);
-          
-          const audioInfo = {
-            codec: codecMatch ? codecMatch[1].trim() : 'unknown',
-            sampleRate: sampleMatch ? sampleMatch[1] + ' Hz' : 'unknown',
-            channels: channelsMatch ? channelsMatch[1] : 'unknown',
-            bitrate: bitrateMatch ? bitrateMatch[1] + ' kb/s' : 'unknown'
-          };
-          
-          logger.success('codec', `Audio: ${audioInfo.codec} ${audioInfo.sampleRate} ${audioInfo.channels}`);
-          logger.debug('codec', 'Audio details', audioInfo);
-          logger.setMetadata('audioCodec', audioInfo);
-        }
-        
-        // Output stream start
-        if (line.includes('Output #0')) {
-          outputStarted = true;
-          logger.success('ffmpeg', 'Output stream started');
-        }
-        
-        // Encoding progress
-        if (line.includes('frame=') && line.includes('fps=')) {
-          if (!ffmpegStarted) {
-            ffmpegStarted = true;
-            logger.success('ffmpeg', '🎬 Encoding started - stream is live!');
-          }
-          
-          // Parse progress (log only every 100 frames to avoid spam)
-          const frameMatch = line.match(/frame=\s*(\d+)/);
-          const fpsMatch = line.match(/fps=\s*([\d.]+)/);
-          const bitrateMatch = line.match(/bitrate=\s*([\d.]+kbits\/s)/);
-          
-          if (frameMatch && parseInt(frameMatch[1]) % 100 === 0) {
-            logger.debug('ffmpeg', 'Encoding progress', {
-              frame: frameMatch[1],
-              fps: fpsMatch ? fpsMatch[1] : 'unknown',
-              bitrate: bitrateMatch ? bitrateMatch[1] : 'unknown'
-            });
-          }
-        }
-        
-        // Errors
-        if (line.toLowerCase().includes('error') || line.toLowerCase().includes('invalid')) {
-          logger.error('ffmpeg', `FFmpeg error: ${line}`);
-        }
-        
-        // Warnings
-        if (line.toLowerCase().includes('warning')) {
-          logger.warn('ffmpeg', `FFmpeg warning: ${line}`);
+        // Detect first frame
+        if (!ffmpegStarted && line.includes('frame=') && line.includes('fps=')) {
+          ffmpegStarted = true;
         }
       });
     });
@@ -1222,34 +1270,31 @@ app.get('/api/stream/:tokenId', async (req, res) => {
     res.set('Connection', 'keep-alive');
     res.set('Transfer-Encoding', 'chunked');
     
-    logger.info('proxy', 'Response headers sent to client');
+    logger.logStreamEvent(streamSessionId, 'Response headers sent');
     
-    // Pipe output to response
+    // Pipe output
     ffmpegProcess.stdout.pipe(res);
     
     // FFmpeg process events
     ffmpegProcess.on('error', (err) => {
-      logger.error('ffmpeg', `Process spawn error: ${err.message}`);
+      logger.logStreamEvent(streamSessionId, 'FFmpeg spawn error', { error: err.message });
     });
     
     ffmpegProcess.on('close', (code) => {
-      logger.info('ffmpeg', `Process closed with code ${code}`);
-      if (code !== 0 && code !== null) {
-        logger.error('ffmpeg', `Abnormal exit code: ${code}`);
-      }
+      const duration = Math.round((Date.now() - streamSession.startTime) / 1000);
+      logger.logStreamEvent(streamSessionId, 'FFmpeg closed', { 
+        code,
+        duration: `${duration}s`
+      });
     });
     
-    // Client disconnect handler
+    // Client disconnect
     req.on('close', () => {
-      logger.warn('proxy', 'Client disconnected');
+      logger.logStreamEvent(streamSessionId, 'Client disconnected');
       if (ffmpegProcess && !ffmpegProcess.killed) {
-        logger.info('ffmpeg', 'Killing FFmpeg process');
         ffmpegProcess.kill('SIGTERM');
-        
-        // Force kill after 2s
         setTimeout(() => {
           if (!ffmpegProcess.killed) {
-            logger.warn('ffmpeg', 'Force killing FFmpeg (SIGKILL)');
             ffmpegProcess.kill('SIGKILL');
           }
         }, 2000);
@@ -1257,10 +1302,11 @@ app.get('/api/stream/:tokenId', async (req, res) => {
     });
     
   } catch (error) {
-    if (logger) {
-      logger.error('proxy', `Stream error: ${error.message}`);
+    if (streamSessionId) {
+      logger.logStreamEvent(streamSessionId, 'Stream error', { error: error.message });
+    } else {
+      logger.error('stream', 'Stream error', { error: error.message });
     }
-    console.error('❌ Stream Error:', error.message);
     
     if (ffmpegProcess && !ffmpegProcess.killed) {
       ffmpegProcess.kill('SIGTERM');
@@ -1272,58 +1318,15 @@ app.get('/api/stream/:tokenId', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 📊 LOGS ENDPOINT
-// ═══════════════════════════════════════════════════════════════════════════════
-
-app.get('/api/stream/logs/:sessionId', authMiddleware, (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    
-    const logger = streamLogs.get(sessionId);
-    
-    if (!logger) {
-      return res.json({
-        success: false,
-        error: 'No logs found for this session'
-      });
-    }
-    
-    // Verify user owns this session
-    if (logger.metadata.userId !== req.user.userId) {
-      return res.status(403).json({
-        success: false,
-        error: 'Access denied'
-      });
-    }
-    
-    res.json({
-      success: true,
-      logs: logger.logs,
-      metadata: logger.metadata,
-      duration: Date.now() - logger.startTime
-    });
-    
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get logs'
-    });
-  }
-});
-
 // Health check
 app.get('/api/health', (req, res) => {
+  const activeSessions = logger.getActiveSessions();
+  
   res.json({ 
-    status: 'ok', 
-    message: 'Backend running - Stream tokens do not require JWT auth!',
+    status: 'ok',
     timestamp: new Date().toISOString(),
-    features: {
-      streamProtection: true,
-      advancedLogging: true,
-      codecDetection: true,
-      tokenAuth: true  // Token in URL, no JWT needed
-    }
+    activeSessions: activeSessions.length,
+    sessions: activeSessions
   });
 });
 
@@ -1334,6 +1337,10 @@ setInterval(() => {
   
   for (const [sessionId, session] of stalkerSessions.entries()) {
     if (now - session.createdAt > oneHour) {
+      logger.debug('iptv', 'Session expired', { 
+        sessionId: sessionId.substring(0, 8),
+        user: session.username
+      });
       stalkerSessions.delete(sessionId);
     }
   }
@@ -1345,18 +1352,15 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// Server startup
 app.listen(PORT, () => {
-  console.log('\n╔═══════════════════════════════════════════════════════╗');
-  console.log('║  🔒📺 IPTV Backend - Token Auth (No JWT on stream)   ║');
-  console.log('╚═══════════════════════════════════════════════════════╝');
-  console.log(`\n📡 Server: http://localhost:${PORT}`);
-  console.log(`✅ Health: http://localhost:${PORT}/api/health`);
-  console.log(`\n🔐 Features:`);
-  console.log(`   ✅ Stream URL Protection (60s tokens, 5 uses)`);
-  console.log(`   ✅ Token in URL (no JWT header needed)`);
-  console.log(`   ✅ Advanced Logging System`);
-  console.log(`   ✅ Codec Detection`);
-  console.log(`\n🔐 Default credentials:`);
-  console.log(`   Username: admin`);
-  console.log(`   Password: admin123\n`);
+  console.log('');
+  console.log('═══════════════════════════════════════════════════════════════════════════════');
+  console.log('  IPTV Backend Server');
+  console.log('═══════════════════════════════════════════════════════════════════════════════');
+  console.log('');
+  logger.info('server', 'Backend started', { port: PORT });
+  logger.info('server', 'Health endpoint', { url: `http://localhost:${PORT}/api/health` });
+  logger.info('server', 'Default credentials', { username: 'admin', password: 'admin123' });
+  console.log('');
 });
