@@ -7,95 +7,71 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <link rel="stylesheet" href="themes.css">
+  
+  <!-- API Module -->
+  <script src="js/api.js"></script>
+  <!-- Utils Module -->
+  <script src="js/utils.js"></script>
 </head>
 <body class="theme-midnight">
   <div id="root"></div>
+  
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
-    const API_URL = '/api';
-    const GROUP_INFO = { 
-      4: { name: 'Generalistas', icon: '📺' }, 
-      6: { name: 'Infantil', icon: '🧒' }, 
-      8: { name: 'Documentários', icon: '🎬' }, 
-      9: { name: 'Filmes', icon: '🎥' }, 
-      11: { name: 'Séries', icon: '📽️' }, 
-      13: { name: 'Desporto', icon: '⚽' }, 
-      14: { name: 'Notícias', icon: '📰' }, 
-      15: { name: 'Música', icon: '🎵' }, 
-      18: { name: 'Entretenimento', icon: '🎭' }, 
-      19: { name: 'Internacionais', icon: '🌍' }, 
-      20: { name: 'Adultos', icon: '🔞' }, 
-      42: { name: 'Religiosos', icon: '⛪' }, 
-      43: { name: 'Regionais', icon: '🏘️' }, 
-      59: { name: 'Brasil', icon: '🇧🇷' }, 
-      67: { name: 'Espanha', icon: '🇪🇸' }, 
-      69: { name: 'França', icon: '🇫🇷' }, 
-      70: { name: 'UK', icon: '🇬🇧' }, 
-      71: { name: 'Outros', icon: '📡' } 
-    };
     
-    const api = {
-      token: localStorage.getItem('authToken'),
-      setToken(token) { 
-        this.token = token; 
-        token ? localStorage.setItem('authToken', token) : localStorage.removeItem('authToken'); 
-      },
-      async fetch(endpoint, options = {}) {
-        const headers = { 'Content-Type': 'application/json', ...options.headers };
-        if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-        const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
-        const data = await response.json();
-        if (response.status === 401) { this.setToken(null); window.location.reload(); }
-        return data;
-      }
-    };
-
     function App() {
+      // Auth state
       const [isAuthenticated, setIsAuthenticated] = useState(false);
       const [user, setUser] = useState(null);
       const [authChecked, setAuthChecked] = useState(false);
+      
+      // UI state
       const [screen, setScreen] = useState('login');
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
       const [loadingProgress, setLoadingProgress] = useState('');
+      
+      // Login form
       const [username, setUsername] = useState('');
       const [password, setPassword] = useState('');
       const [isLoggingIn, setIsLoggingIn] = useState(false);
+      
+      // IPTV state
       const [iptvSessionId, setIptvSessionId] = useState('');
       const [channels, setChannels] = useState([]);
-      const [groups, setGroups] = useState([]);
-      const [selectedGroup, setSelectedGroup] = useState(null);
+      const [genres, setGenres] = useState([]);
+      const [genresMap, setGenresMap] = useState({});
+      const [selectedGenre, setSelectedGenre] = useState(null);
       const [showChannels, setShowChannels] = useState(false);
       const [searchTerm, setSearchTerm] = useState('');
+      
+      // Player state
       const [currentChannel, setCurrentChannel] = useState(null);
       const [isFullscreen, setIsFullscreen] = useState(false);
+      const videoRef = useRef(null);
+      const playerRef = useRef(null);
+      const watchdogIntervalRef = useRef(null);
+      
+      // Modals
       const [showChangePassword, setShowChangePassword] = useState(false);
       const [showPreferences, setShowPreferences] = useState(false);
       const [currentPassword, setCurrentPassword] = useState('');
       const [newPassword, setNewPassword] = useState('');
       const [confirmPassword, setConfirmPassword] = useState('');
+      
+      // Theme
       const [currentTheme, setCurrentTheme] = useState(localStorage.getItem('theme') || 'midnight');
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-      const videoRef = useRef(null);
-      const playerRef = useRef(null);
 
-      // Silent logging - no sensitive data exposed to browser console
-      const log = {
-        info: () => {}, // Silent in production
-        error: (msg) => console.error('Error:', msg), // Only show user-friendly errors
-        player: () => {} // Silent - player events handled internally
-      };
-
-      // Apply theme on mount and when changed
+      // Apply theme
       useEffect(() => {
         document.body.className = `theme-${currentTheme}`;
         localStorage.setItem('theme', currentTheme);
       }, [currentTheme]);
 
-      // Disable mpegts.js logging globally on mount
+      // Disable mpegts.js logging
       useEffect(() => {
         if (typeof mpegts !== 'undefined' && mpegts.LoggingControl) {
           mpegts.LoggingControl.applyConfig({
@@ -109,17 +85,46 @@
         }
       }, []);
 
-      useEffect(() => { checkAuth(); }, []);
+      // Check auth on mount
+      useEffect(() => { 
+        checkAuth(); 
+      }, []);
 
+      // Cleanup on unmount
+      useEffect(() => {
+        return () => {
+          if (playerRef.current) {
+            playerRef.current.destroy?.();
+          }
+          if (watchdogIntervalRef.current) {
+            clearInterval(watchdogIntervalRef.current);
+          }
+        };
+      }, []);
+      
+      // Fullscreen detection
+      useEffect(() => { 
+        const handler = () => setIsFullscreen(!!document.fullscreenElement); 
+        document.addEventListener('fullscreenchange', handler); 
+        return () => document.removeEventListener('fullscreenchange', handler); 
+      }, []);
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // AUTH FUNCTIONS
+      // ═══════════════════════════════════════════════════════════════════════
+      
       const checkAuth = async () => {
-        if (!api.token) { setAuthChecked(true); return; }
+        if (!api.token) { 
+          setAuthChecked(true); 
+          return; 
+        }
+        
         try {
-          const data = await api.fetch('/auth/me');
+          const data = await api.getMe();
           if (data.success) { 
             setUser(data.user); 
             setIsAuthenticated(true);
             
-            // Backend already returns hasPortalConfig correctly
             if (data.user.hasPortalConfig) {
               connectToIPTV();
             } else {
@@ -138,38 +143,48 @@
         setIsLoggingIn(true);
         
         try {
-          const data = await api.fetch('/auth/login', { 
-            method: 'POST', 
-            body: JSON.stringify({ username, password }) 
-          });
+          const data = await api.login(username, password);
           
-          if (!data.success) throw new Error(data.error || 'Login failed');
+          if (!data.success) {
+            throw new Error(data.error || 'Login failed');
+          }
           
           api.setToken(data.token); 
           setUser(data.user); 
           setIsAuthenticated(true);
           
-          // Backend returns hasPortalConfig correctly
           if (data.user.hasPortalConfig) {
             connectToIPTV();
           } else {
             setScreen('noconfig');
           }
         } catch (err) { 
-          log.error(err.message);
           setError(err.message); 
         } finally { 
           setIsLoggingIn(false); 
         }
       };
 
-      const handleLogout = () => {
+      const handleLogout = async () => {
+        // Cleanup
+        if (iptvSessionId) {
+          await api.iptvDisconnect(iptvSessionId);
+        }
+        if (watchdogIntervalRef.current) {
+          clearInterval(watchdogIntervalRef.current);
+        }
+        if (playerRef.current) {
+          playerRef.current.destroy?.();
+        }
+        
+        // Reset state
         api.setToken(null); 
         setUser(null); 
         setIsAuthenticated(false); 
         setIptvSessionId(''); 
         setChannels([]); 
-        setGroups([]); 
+        setGenres([]);
+        setGenresMap({});
         setCurrentChannel(null); 
         setScreen('login');
       };
@@ -178,20 +193,21 @@
         e.preventDefault(); 
         setError(''); 
         setSuccess('');
+        
         if (newPassword !== confirmPassword) { 
           setError('Passwords do not match'); 
           return; 
         }
+        
         try {
-          const data = await api.fetch('/auth/change-password', { 
-            method: 'POST', 
-            body: JSON.stringify({ currentPassword, newPassword }) 
-          });
+          const data = await api.changePassword(currentPassword, newPassword);
           if (!data.success) throw new Error(data.error);
+          
           setSuccess('Password changed!'); 
           setCurrentPassword(''); 
           setNewPassword(''); 
           setConfirmPassword('');
+          
           setTimeout(() => { 
             setShowChangePassword(false); 
             setSuccess(''); 
@@ -201,58 +217,106 @@
         }
       };
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // IPTV FUNCTIONS
+      // ═══════════════════════════════════════════════════════════════════════
+      
       const connectToIPTV = async () => {
         setScreen('loading'); 
         setLoadingProgress('Connecting to IPTV...');
         
         try {
-          const connectData = await api.fetch('/iptv/connect', { method: 'POST' });
-          if (!connectData.success) throw new Error(connectData.error || 'IPTV connection failed');
+          // Connect
+          const connectData = await api.iptvConnect();
+          if (!connectData.success) {
+            throw new Error(connectData.error || 'IPTV connection failed');
+          }
           
-          setIptvSessionId(connectData.sessionId);
+          const sessionId = connectData.sessionId;
+          setIptvSessionId(sessionId);
           
+          // Load genres
+          setLoadingProgress('Loading genres...');
+          const genresData = await api.iptvGetGenres(sessionId, 'itv');
+          
+          if (genresData.success) {
+            // Create genres map
+            const map = {};
+            genresData.genres.forEach(g => {
+              map[g.id] = {
+                name: g.title,
+                icon: utils.getIconForGenre(g.title)
+              };
+            });
+            setGenresMap(map);
+          }
+          
+          // Load channels
           setLoadingProgress('Loading channels...');
+          const chData = await api.iptvGetChannels(sessionId);
           
-          const chData = await api.fetch('/iptv/channels', { 
-            method: 'POST', 
-            body: JSON.stringify({ sessionId: connectData.sessionId }) 
-          });
-          
-          if (!chData.success) throw new Error(chData.error || 'Failed to load channels');
+          if (!chData.success) {
+            throw new Error(chData.error || 'Failed to load channels');
+          }
           
           setChannels(chData.channels);
           
-          // Process groups
-          const groupMap = {};
+          // Process genres from channels
+          const genreMap = {};
           chData.channels.forEach(ch => { 
             const gid = ch.tv_genre_id || 0; 
-            if (!groupMap[gid]) { 
-              const info = GROUP_INFO[gid] || { name: `Group ${gid}`, icon: '📁' }; 
-              groupMap[gid] = { id: gid, name: info.name, icon: info.icon, count: 0 }; 
+            if (!genreMap[gid]) {
+              const info = map[gid] || { name: `Group ${gid}`, icon: '📁' }; 
+              genreMap[gid] = { 
+                id: gid, 
+                name: info.name, 
+                icon: info.icon, 
+                count: 0 
+              }; 
             } 
-            groupMap[gid].count++; 
+            genreMap[gid].count++; 
           });
           
-          setGroups(Object.values(groupMap).sort((a, b) => b.count - a.count));
+          setGenres(Object.values(genreMap).sort((a, b) => b.count - a.count));
+          
+          // Start watchdog
+          startWatchdog(sessionId);
+          
           setScreen('main');
         } catch (err) { 
-          log.error(err.message);
           setError(err.message); 
           setScreen('noconfig'); 
         }
       };
 
-      const handleSelectGroup = (groupId) => { 
-        setSelectedGroup(groupId); 
+      const startWatchdog = (sessionId) => {
+        if (watchdogIntervalRef.current) {
+          clearInterval(watchdogIntervalRef.current);
+        }
+        
+        watchdogIntervalRef.current = setInterval(() => {
+          api.iptvWatchdog(sessionId).catch(() => {
+            // Silent fail - watchdog is best-effort
+          });
+        }, 60000); // 60 seconds
+      };
+
+      const handleSelectGenre = (genreId) => { 
+        setSelectedGenre(genreId); 
         setShowChannels(true); 
         setSearchTerm(''); 
       };
       
-      const handleBackToGroups = () => setShowChannels(false);
+      const handleBackToGenres = () => {
+        setShowChannels(false);
+        setSearchTerm('');
+      };
 
-      const getGroupChannels = () => {
-        if (selectedGroup === null) return [];
-        let filtered = channels.filter(ch => ch.tv_genre_id === selectedGroup);
+      const getGenreChannels = () => {
+        if (selectedGenre === null) return [];
+        
+        let filtered = channels.filter(ch => ch.tv_genre_id === selectedGenre);
+        
         if (searchTerm) { 
           const term = searchTerm.toLowerCase(); 
           filtered = filtered.filter(ch => 
@@ -260,36 +324,37 @@
             ch.number.toString().includes(term)
           ); 
         }
+        
         return filtered.sort((a, b) => a.number - b.number);
       };
 
-      const getFilteredGroups = () => { 
-        if (!searchTerm) return groups; 
+      const getFilteredGenres = () => { 
+        if (!searchTerm) return genres; 
+        
         const term = searchTerm.toLowerCase(); 
-        return groups.filter(g => g.name.toLowerCase().includes(term)); 
+        return genres.filter(g => g.name.toLowerCase().includes(term)); 
       };
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // PLAYER FUNCTIONS
+      // ═══════════════════════════════════════════════════════════════════════
+      
       const playChannel = async (channel) => {
         setCurrentChannel(channel);
         
         try {
-          const data = await api.fetch('/iptv/stream', { 
-            method: 'POST', 
-            body: JSON.stringify({ 
-              sessionId: iptvSessionId, 
-              channelId: channel.id, 
-              cmd: channel.cmd, 
-              channelName: channel.name 
-            }) 
-          });
+          const data = await api.iptvGetStream(
+            iptvSessionId,
+            channel.id,
+            channel.cmd,
+            channel.name
+          );
           
           if (data.success && data.streamUrl) { 
             loadStream(data.streamUrl); 
-          } else { 
-            log.error('Failed to get stream');
           }
         } catch (err) { 
-          log.error(err.message);
+          console.error('Stream error');
         }
       };
 
@@ -312,18 +377,13 @@
         
         // Check mpegts.js support
         if (!mpegts || !mpegts.isSupported()) {
-          log.error('Video playback not supported in this browser');
+          console.error('Video playback not supported');
           return;
         }
         
-        // Disable mpegts.js logging globally
+        // Disable logging
         mpegts.LoggingControl.applyConfig({
-          enableAll: false,
-          enableDebug: false,
-          enableVerbose: false,
-          enableInfo: false,
-          enableWarn: false,
-          enableError: false
+          enableAll: false
         });
         
         // Create player
@@ -338,7 +398,7 @@
           isLive: true,
           lazyLoad: false,
           autoCleanupSourceBuffer: true,
-          enableLogging: false  // Disable player logging
+          enableLogging: false
         });
         
         player.attachMediaElement(video); 
@@ -347,167 +407,127 @@
         // Auto-play after buffer
         setTimeout(() => {
           if (video.readyState >= 1) {
-            video.play().catch(() => {
-              // Auto-play blocked - user needs to interact
-            });
+            video.play().catch(() => {});
           }
         }, 3000);
         
-        // Error handling only
-        player.on(mpegts.Events.ERROR, (type, detail) => {
-          log.error('Playback error');
-        });
-        
         video.oncanplay = () => {
           video.play().catch(() => {});
-        };
-        
-        video.onerror = () => {
-          log.error('Video playback failed');
         };
         
         playerRef.current = player;
       };
 
       const toggleFullscreen = () => { 
-        isFullscreen ? document.exitFullscreen() : document.querySelector('.player-section')?.requestFullscreen(); 
-        setIsFullscreen(!isFullscreen); 
+        if (isFullscreen) {
+          document.exitFullscreen();
+        } else {
+          document.querySelector('.player-section')?.requestFullscreen();
+        }
       };
 
-      useEffect(() => () => playerRef.current?.destroy?.(), []);
+      // ═══════════════════════════════════════════════════════════════════════
+      // RENDER
+      // ═══════════════════════════════════════════════════════════════════════
       
-      useEffect(() => { 
-        const handler = () => setIsFullscreen(!!document.fullscreenElement); 
-        document.addEventListener('fullscreenchange', handler); 
-        return () => document.removeEventListener('fullscreenchange', handler); 
-      }, []);
-
-      if (!authChecked) return (
-        <div className="loading-screen">
-          <div className="spinner"></div>
-          <div className="loading-text">Loading...</div>
-        </div>
-      );
-
-      if (!isAuthenticated) return (
-        <div className="login-screen">
-          <div className="login-card">
-            <h1>📺 IPTV Player</h1>
-            <p className="subtitle">Sign in to continue</p>
-
-            {error && <div className="error-msg">{error}</div>}
-            
-            <form onSubmit={handleLogin}>
-              <div className="form-group">
-                <label>Username</label>
-                <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder="Enter username"
-                  required
-                  autoFocus
-                />
-              </div>
-              
-              <div className="form-group">
-                <label>Password</label>
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Enter password"
-                  required
-                />
-              </div>
-              
-              <button type="submit" className="btn" disabled={isLoggingIn}>
-                {isLoggingIn ? 'Signing in...' : 'Sign In'}
-              </button>
-            </form>
+      if (!authChecked) {
+        return (
+          <div className="loading-screen">
+            <div className="spinner"></div>
+            <div className="loading-text">Loading...</div>
           </div>
-        </div>
-      );
+        );
+      }
 
-      if (screen === 'noconfig') return (
-        <div className="no-config-screen">
-          <div className="no-config-card">
-            <div className="icon">⚙️</div>
-            <h2>Configuration Required</h2>
-            <p>Your account is not yet configured for IPTV access.<br/>Contact the administrator to set up your portal URL and MAC address.</p>
-            <button className="btn btn-secondary" onClick={handleLogout}>Sign Out</button>
+      if (!isAuthenticated) {
+        return (
+          <div className="login-screen">
+            <div className="login-card">
+              <h1>📺 IPTV Player</h1>
+              <p className="subtitle">Sign in to continue</p>
+
+              {error && <div className="error-msg">{error}</div>}
+              
+              <form onSubmit={handleLogin}>
+                <div className="form-group">
+                  <label>Username</label>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Enter username"
+                    required
+                    autoFocus
+                  />
+                </div>
+                
+                <div className="form-group">
+                  <label>Password</label>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter password"
+                    required
+                  />
+                </div>
+                
+                <button type="submit" className="btn" disabled={isLoggingIn}>
+                  {isLoggingIn ? 'Signing in...' : 'Sign In'}
+                </button>
+              </form>
+            </div>
           </div>
-        </div>
-      );
+        );
+      }
 
-      if (screen === 'loading') return (
-        <div className="loading-screen">
-          <div className="spinner"></div>
-          <div className="loading-text">Loading IPTV</div>
-          <div className="loading-progress">{loadingProgress}</div>
-        </div>
-      );
+      if (screen === 'noconfig') {
+        return (
+          <div className="no-config-screen">
+            <div className="no-config-card">
+              <div className="icon">⚙️</div>
+              <h2>Configuration Required</h2>
+              <p>Your account is not yet configured for IPTV access.<br/>Contact the administrator to set up your portal URL and MAC address.</p>
+              <button className="btn btn-secondary" onClick={handleLogout}>Sign Out</button>
+            </div>
+          </div>
+        );
+      }
 
-      const groupChannels = getGroupChannels();
-      const filteredGroups = getFilteredGroups();
-      const selectedGroupInfo = groups.find(g => g.id === selectedGroup);
+      if (screen === 'loading') {
+        return (
+          <div className="loading-screen">
+            <div className="spinner"></div>
+            <div className="loading-text">Loading IPTV</div>
+            <div className="loading-progress">{loadingProgress}</div>
+          </div>
+        );
+      }
+
+      const genreChannels = getGenreChannels();
+      const filteredGenres = getFilteredGenres();
+      const selectedGenreInfo = genres.find(g => g.id === selectedGenre);
 
       return (
         <div className="app-layout">
-          {/* Navigation Rail (preparado para Movies/Series/EPG) */}
+          {/* Navigation Rail */}
           <div className="nav-rail">
-            <div className="nav-item active" title="TV Channels">
-              📺
-            </div>
-            <div className="nav-item" title="Movies (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>
-              🎬
-            </div>
-            <div className="nav-item" title="Series (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>
-              📽️
-            </div>
+            <div className="nav-item active" title="TV Channels">📺</div>
+            <div className="nav-item" title="Movies (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>🎬</div>
+            <div className="nav-item" title="Series (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>📽️</div>
             <div className="nav-divider"></div>
-            <div className="nav-item" title="EPG Guide (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>
-              📅
-            </div>
-            
+            <div className="nav-item" title="EPG Guide (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>📅</div>
             <div className="nav-divider"></div>
-            
-            {/* User Options */}
-            <div 
-              className="nav-item" 
-              title="Preferences"
-              onClick={() => setShowPreferences(true)}
-            >
-              🎨
-            </div>
-            <div 
-              className="nav-item" 
-              title="Change Password"
-              onClick={() => setShowChangePassword(true)}
-            >
-              🔐
-            </div>
+            <div className="nav-item" title="Preferences" onClick={() => setShowPreferences(true)}>🎨</div>
+            <div className="nav-item" title="Change Password" onClick={() => setShowChangePassword(true)}>🔐</div>
             {user?.role === 'admin' && (
-              <div 
-                className="nav-item" 
-                title="Admin Panel"
-                onClick={() => window.open('/admin.html', '_blank')}
-              >
-                ⚙️
-              </div>
+              <div className="nav-item" title="Admin Panel" onClick={() => window.open('/admin.html', '_blank')}>⚙️</div>
             )}
-            
             <div className="nav-spacer"></div>
-            
-            <div 
-              className="nav-item nav-item-danger" 
-              title="Sign Out"
-              onClick={handleLogout}
-            >
-              🚪
-            </div>
+            <div className="nav-item nav-item-danger" title="Sign Out" onClick={handleLogout}>🚪</div>
           </div>
 
+          {/* Sidebar */}
           <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
             <div className="sidebar-header">
               <div className="sidebar-header-top">
@@ -527,7 +547,7 @@
                 <input
                   type="text"
                   className="search-input"
-                  placeholder={showChannels ? "Search channels..." : "Search groups..."}
+                  placeholder={showChannels ? "Search channels..." : "Search genres..."}
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                 />
@@ -536,20 +556,20 @@
             
             <div className="slide-container">
               <div className={`slide-wrapper ${showChannels ? 'show-channels' : ''}`}>
-                {/* Groups Panel */}
+                {/* Genres Panel */}
                 <div className="slide-panel">
                   <div className="groups-panel">
-                    {filteredGroups.map(group => (
+                    {filteredGenres.map(genre => (
                       <div 
-                        key={group.id} 
+                        key={genre.id} 
                         className="group-item" 
-                        onClick={() => handleSelectGroup(group.id)}
+                        onClick={() => handleSelectGenre(genre.id)}
                       >
                         <div className="group-info">
-                          <div className="group-icon">{group.icon}</div>
-                          <span className="name">{group.name}</span>
+                          <div className="group-icon">{genre.icon}</div>
+                          <span className="name">{genre.name}</span>
                         </div>
-                        <span className="count">{group.count}</span>
+                        <span className="count">{genre.count}</span>
                       </div>
                     ))}
                   </div>
@@ -558,23 +578,23 @@
                 {/* Channels Panel */}
                 <div className="slide-panel">
                   <div className="channels-panel">
-                    {selectedGroupInfo && (
+                    {selectedGenreInfo && (
                       <div className="channels-panel-header">
                         <button 
                           className="back-arrow-btn" 
-                          onClick={handleBackToGroups}
-                          title="Back to groups"
+                          onClick={handleBackToGenres}
+                          title="Back to genres"
                         >
                           ←
                         </button>
                         <div className="channel-header-info">
-                          <h3>{selectedGroupInfo.icon} {selectedGroupInfo.name}</h3>
-                          <span>{groupChannels.length} channels</span>
+                          <h3>{selectedGenreInfo.icon} {selectedGenreInfo.name}</h3>
+                          <span>{genreChannels.length} channels</span>
                         </div>
                       </div>
                     )}
                     <div className="channels-list">
-                      {groupChannels.map(channel => (
+                      {genreChannels.map(channel => (
                         <div 
                           key={channel.id} 
                           className={`channel-item ${currentChannel?.id === channel.id ? 'playing' : ''}`}
@@ -602,8 +622,8 @@
             </div>
           </div>
           
+          {/* Main Content */}
           <div className="main-content">
-            {/* Floating sidebar toggle button - only visible when collapsed */}
             {sidebarCollapsed && (
               <button 
                 className="floating-sidebar-toggle"
@@ -643,7 +663,7 @@
                 <div className="no-channel-message">
                   <div className="icon">📺</div>
                   <h3>Select a Channel</h3>
-                  <p>Choose a group and channel from the menu</p>
+                  <p>Choose a genre and channel from the menu</p>
                 </div>
               )}
             </div>

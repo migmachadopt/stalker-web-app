@@ -29,9 +29,12 @@ jobs:
         working-directory: ./backend
         run: npm ci
 
-      - name: 🧪 Check syntax
+      - name: 🧪 Check backend syntax
         working-directory: ./backend
-        run: node --check server.js
+        run: |
+          node --check server.js
+          node --check config/constants.js
+          node --check services/iptvService.js
 
       - name: ✅ Tests passed
         run: echo "✅ All tests passed!"
@@ -55,7 +58,6 @@ jobs:
           echo "📍 IP: $(hostname -I | awk '{print $1}')"
           echo "📦 Node: $(node --version)"
           echo "👤 User: $(whoami)"
-          echo "🔑 Groups: $(groups)"
           echo ""
 
       - name: 🔒 Ensure data/ is a symlink
@@ -84,15 +86,9 @@ jobs:
           else
             echo "✅ data/ is already a symlink"
           fi
-          
-          # Verify
-          echo ""
-          echo "🔗 Status:"
-          ls -la "${{ env.APP_DIR }}/backend/" | grep data || echo "  Symlink not found!"
 
       - name: 💾 Backup .env file
         run: |
-          # ONLY .env - NEVER backup data/
           if [ -f "${{ env.APP_DIR }}/.env" ]; then
             sudo cp "${{ env.APP_DIR }}/.env" /tmp/.env.backup
             echo "✅ .env backed up"
@@ -113,7 +109,7 @@ jobs:
             --delete \
             ./backend/ ${{ env.APP_DIR }}/backend/
           
-          echo "✅ Backend synchronized"
+          echo "✅ Backend synchronized (including new modular structure)"
 
       - name: 🔗 Recreate symlink (safety net)
         run: |
@@ -143,10 +139,13 @@ jobs:
       - name: 📤 Deploy frontend
         run: |
           sudo rsync -av --delete ./frontend/ ${{ env.APP_DIR }}/frontend/
-          echo "✅ Frontend synchronized"
+          echo "✅ Frontend synchronized (including new JS modules)"
 
       - name: 📦 Install dependencies
         run: |
+          echo "╔═══════════════════════════════════════════════════════╗"
+          echo "║           📦 INSTALLING DEPENDENCIES                  ║"
+          echo "╚═══════════════════════════════════════════════════════╝"
           cd ${{ env.APP_DIR }}/backend
           sudo -u iptv npm ci --production
           echo "✅ Dependencies installed"
@@ -174,15 +173,6 @@ jobs:
           fi
           
           echo "✅ Permissions fixed"
-          
-          # Test access
-          echo ""
-          echo "🧪 Testing access as iptv user:"
-          if sudo -u iptv test -r /var/lib/iptv-player/data/users.enc 2>/dev/null; then
-            echo "✅ iptv can read users.enc"
-          else
-            echo "⚠️  users.enc not found (will be created on first login)"
-          fi
 
       - name: 🔐 Verify .env file
         run: |
@@ -201,6 +191,9 @@ jobs:
 
       - name: 🔄 Restart backend
         run: |
+          echo "╔═══════════════════════════════════════════════════════╗"
+          echo "║           🔄 RESTARTING APPLICATION                   ║"
+          echo "╚═══════════════════════════════════════════════════════╝"
           cd ${{ env.APP_DIR }}
           
           if ! command -v pm2 &> /dev/null; then
@@ -212,24 +205,76 @@ jobs:
             echo "🔄 Restarting application..."
             sudo -u iptv pm2 restart iptv-backend --update-env
           else
-            echo "🚀 Starting application..."
+            echo "🚀 Starting application for first time..."
             cd backend
             sudo -u iptv pm2 start server.js --name iptv-backend
           fi
           
           sudo -u iptv pm2 save
-          echo "✅ Backend restarted"
+          echo "✅ Backend restarted with new modular architecture"
 
       - name: ⏳ Wait for initialization
         run: sleep 5
 
+      - name: ✅ Verify modular structure
+        run: |
+          echo "╔═══════════════════════════════════════════════════════╗"
+          echo "║           📊 STRUCTURE VERIFICATION                   ║"
+          echo "╚═══════════════════════════════════════════════════════╝"
+          
+          echo "🔍 Checking backend modules..."
+          
+          MODULES=(
+            "${{ env.APP_DIR }}/backend/config/constants.js"
+            "${{ env.APP_DIR }}/backend/middleware/auth.js"
+            "${{ env.APP_DIR }}/backend/services/iptvService.js"
+            "${{ env.APP_DIR }}/backend/services/streamService.js"
+            "${{ env.APP_DIR }}/backend/utils/logger.js"
+          )
+          
+          ERROR=0
+          for module in "${MODULES[@]}"; do
+            if [ -f "$module" ]; then
+              echo "✅ $(basename $module)"
+            else
+              echo "❌ $(basename $module) NOT FOUND"
+              ERROR=1
+            fi
+          done
+          
+          if [ $ERROR -eq 1 ]; then
+            echo "❌ Some modules missing!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "🔍 Checking frontend modules..."
+          
+          if [ -f "${{ env.APP_DIR }}/frontend/js/api.js" ]; then
+            echo "✅ api.js"
+          else
+            echo "❌ api.js NOT FOUND"
+            ERROR=1
+          fi
+          
+          if [ -f "${{ env.APP_DIR }}/frontend/js/utils.js" ]; then
+            echo "✅ utils.js"
+          else
+            echo "❌ utils.js NOT FOUND"
+            ERROR=1
+          fi
+          
+          if [ $ERROR -eq 1 ]; then
+            echo "❌ Some frontend modules missing!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ All modules deployed successfully!"
+
       - name: ✅ Final verification
         if: always()
         run: |
-          echo "╔═══════════════════════════════════════════════════════╗"
-          echo "║           📊 FINAL VERIFICATION                       ║"
-          echo "╚═══════════════════════════════════════════════════════╝"
-          
           echo ""
           echo "🔗 Symlink status:"
           ls -la ${{ env.APP_DIR }}/backend/ | grep data || echo "  data/ not found"
@@ -250,13 +295,21 @@ jobs:
           echo "║           🏥 HEALTH CHECK                             ║"
           echo "╚═══════════════════════════════════════════════════════╝"
           
-          for i in {1..5}; do
+          for i in {1..10}; do
             if curl -s http://localhost:3001/api/health | grep -q "ok"; then
               echo "✅ Backend is ONLINE!"
               curl -s http://localhost:3001/api/health | jq . 2>/dev/null || echo ""
+              
+              echo ""
+              echo "🎉 NEW FEATURES DEPLOYED:"
+              echo "  • Custom portal paths support"
+              echo "  • Dynamic genres loading"
+              echo "  • Watchdog keep-alive (60s)"
+              echo "  • Modular architecture"
+              
               exit 0
             fi
-            echo "⏳ Attempt $i/5..."
+            echo "⏳ Attempt $i/10..."
             sleep 3
           done
           
