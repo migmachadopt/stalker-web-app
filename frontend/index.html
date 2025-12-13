@@ -121,12 +121,14 @@
         
         try {
           const data = await api.getMe();
-          if (data.success) { 
+          
+          if (data.success && data.user) { 
             setUser(data.user); 
             setIsAuthenticated(true);
             
-            if (data.user.hasPortalConfig) {
-              connectToIPTV();
+            // 🐛 FIX: Check explicitly for true boolean
+            if (data.user.hasPortalConfig === true) {
+              await connectToIPTV();
             } else {
               setScreen('noconfig');
             }
@@ -153,8 +155,9 @@
           setUser(data.user); 
           setIsAuthenticated(true);
           
-          if (data.user.hasPortalConfig) {
-            connectToIPTV();
+          // 🐛 FIX: Check explicitly for true boolean
+          if (data.user.hasPortalConfig === true) {
+            await connectToIPTV();
           } else {
             setScreen('noconfig');
           }
@@ -166,27 +169,48 @@
       };
 
       const handleLogout = async () => {
-        // Cleanup
-        if (iptvSessionId) {
-          await api.iptvDisconnect(iptvSessionId);
-        }
-        if (watchdogIntervalRef.current) {
-          clearInterval(watchdogIntervalRef.current);
-        }
-        if (playerRef.current) {
-          playerRef.current.destroy?.();
+        try {
+          // Cleanup
+          if (iptvSessionId) {
+            try {
+              await api.iptvDisconnect(iptvSessionId);
+            } catch (err) {
+              // Silent fail
+            }
+          }
+          
+          if (watchdogIntervalRef.current) {
+            clearInterval(watchdogIntervalRef.current);
+            watchdogIntervalRef.current = null;
+          }
+          
+          if (playerRef.current) {
+            try {
+              playerRef.current.destroy?.();
+            } catch (err) {
+              // Silent fail
+            }
+            playerRef.current = null;
+          }
+        } catch (error) {
+          // Silent fail on cleanup
         }
         
-        // Reset state
+        // Reset ALL state
         api.setToken(null); 
         setUser(null); 
         setIsAuthenticated(false); 
         setIptvSessionId(''); 
         setChannels([]); 
         setGenres([]);
-        setGenresMap({});
+        setGenresMap({});  // 🐛 FIX: Reset genresMap to fix "map is not defined" error
+        setSelectedGenre(null);
+        setShowChannels(false);
+        setSearchTerm('');
         setCurrentChannel(null); 
         setScreen('login');
+        setError('');
+        setSuccess('');
       };
 
       const handleChangePassword = async (e) => {
@@ -245,7 +269,7 @@
             genresData.genres.forEach(g => {
               map[g.id] = {
                 name: g.title,
-                icon: utils.getIconForGenre(g.title)
+                icon: utils?.getIconForGenre?.(g.title) || '📁'
               };
             });
             setGenresMap(map);
@@ -266,7 +290,7 @@
           chData.channels.forEach(ch => { 
             const gid = ch.tv_genre_id || 0; 
             if (!genreMap[gid]) {
-              const info = map[gid] || { name: `Group ${gid}`, icon: '📁' }; 
+              const info = genresMap[gid] || { name: `Group ${gid}`, icon: '📁' }; 
               genreMap[gid] = { 
                 id: gid, 
                 name: info.name, 
