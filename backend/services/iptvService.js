@@ -140,30 +140,52 @@ class IPTVService {
     return this.sessions.get(sessionId);
   }
 
+  // 🐛 FIX: Corrigido método getGenres
   async getGenres(sessionId, type = 'itv') {
     const session = this.getSession(sessionId);
     if (!session) throw new Error('Invalid session');
 
     logger.logUserActivity(session.username, `fetching ${type} genres`);
 
-    const response = await axios.get(
-      `${session.portalUrl}?action=get_genres&type=${type}&JsHttpRequest=1-xml`,
-      { 
+    try {
+      const url = `${session.portalUrl}?action=get_genres&type=${type}&JsHttpRequest=1-xml`;
+      
+      logger.info('iptv', `Genres request URL: ${url}`);
+
+      const response = await axios.get(url, { 
         headers: this.getStalkerHeaders(session.token, session.macAddress),
-        timeout: 15000 
+        timeout: 15000,
+        validateStatus: (status) => status < 500
+      });
+
+      logger.info('iptv', `Genres response status: ${response.status}`);
+      logger.info('iptv', `Genres response data:`, response.data);
+
+      if (response.status !== 200) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-    );
 
-    const genres = response.data?.js || [];
-    
-    logger.info('iptv', `${session.username} - Loaded ${genres.length} ${type} genres`);
+      const genres = response.data?.js || [];
+      
+      logger.info('iptv', `${session.username} - Loaded ${genres.length} ${type} genres`);
 
-    return genres.map(g => ({
-      id: g.id,
-      title: g.title || g.name,
-      alias: g.alias,
-      censored: g.censored === "1"
-    }));
+      return genres.map(g => ({
+        id: g.id,
+        title: g.title || g.name,
+        alias: g.alias,
+        censored: g.censored === "1"
+      }));
+
+    } catch (error) {
+      logger.error('iptv', 'Genres fetch error', { 
+        error: error.message,
+        url: `${session.portalUrl}?action=get_genres&type=${type}`,
+        response: error.response?.data,
+        status: error.response?.status
+      });
+      
+      throw new Error(`Failed to fetch genres: ${error.message}`);
+    }
   }
 
   async getChannels(sessionId) {
@@ -298,79 +320,46 @@ class IPTVService {
     try {
       const response = await axios.get(
         `${session.portalUrl}?action=get_events&event_active_id=0&init=1&type=watchdog&cur_play_type=0&JsHttpRequest=1-xml`,
-        { 
+        {
           headers: this.getStalkerHeaders(session.token, session.macAddress),
-          timeout: 10000
+          timeout: 10000,
         }
       );
 
-      const data = response.data?.js?.data || {};
-
-      logger.debug('iptv', `${session.username} - Watchdog ping`, {
-        messages: data.msgs || 0,
-        services: data.additional_services_on || 0
-      });
-
-      return {
-        messages: data.msgs || 0,
-        additionalServices: data.additional_services_on || 0
-      };
+      return response.data?.js || {};
     } catch (error) {
-      logger.warn('iptv', `${session.username} - Watchdog failed`, { error: error.message });
-      return null;
+      logger.error('iptv', `${session.username} - Watchdog failed`, { error: error.message });
+      throw error;
     }
   }
 
-  startWatchdog(sessionId) {
-    // Clear existing interval if any
-    this.stopWatchdog(sessionId);
-
-    // Start new interval
-    const intervalId = setInterval(() => {
-      this.watchdog(sessionId);
-    }, config.WATCHDOG_INTERVAL);
-
-    this.watchdogIntervals.set(sessionId, intervalId);
-    
+  destroySession(sessionId) {
     const session = this.getSession(sessionId);
+    
     if (session) {
-      logger.info('iptv', `${session.username} - Watchdog started`, {
-        interval: `${config.WATCHDOG_INTERVAL / 1000}s`
-      });
-    }
-  }
-
-  stopWatchdog(sessionId) {
-    const intervalId = this.watchdogIntervals.get(sessionId);
-    if (intervalId) {
-      clearInterval(intervalId);
-      this.watchdogIntervals.delete(sessionId);
-      
-      const session = this.getSession(sessionId);
-      if (session) {
-        logger.info('iptv', `${session.username} - Watchdog stopped`);
+      // Stop watchdog if running
+      if (this.watchdogIntervals.has(sessionId)) {
+        clearInterval(this.watchdogIntervals.get(sessionId));
+        this.watchdogIntervals.delete(sessionId);
       }
+      
+      this.sessions.delete(sessionId);
     }
   }
 
   cleanupSessions() {
     const now = Date.now();
-
+    const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 24 hours
+    
     for (const [sessionId, session] of this.sessions.entries()) {
-      if (now - session.createdAt > config.SESSION_TIMEOUT) {
-        logger.debug('iptv', 'Session expired', { 
-          sessionId: sessionId.substring(0, 8),
-          user: session.username
+      if (now - session.createdAt > MAX_SESSION_AGE) {
+        logger.info('iptv', `Cleaning up old session`, { 
+          username: session.username,
+          age: Math.floor((now - session.createdAt) / 1000 / 60) + ' minutes'
         });
-        this.stopWatchdog(sessionId);
-        this.sessions.delete(sessionId);
+        this.destroySession(sessionId);
       }
     }
-  }
-
-  destroySession(sessionId) {
-    this.stopWatchdog(sessionId);
-    this.sessions.delete(sessionId);
   }
 }
 
