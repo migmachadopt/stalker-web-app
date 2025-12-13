@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// 👥 User Management Service
+// 👥 User Management Service - FIXED
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const fs = require('fs');
@@ -29,7 +29,27 @@ class UserService {
       
       const encryptedData = JSON.parse(fs.readFileSync(config.USERS_FILE, 'utf8'));
       const decrypted = encryption.decrypt(encryptedData);
-      return JSON.parse(decrypted);
+      const data = JSON.parse(decrypted);
+      
+      let needsSave = false;
+      data.users = data.users.map(u => {
+        if (u.portalUrl === undefined || u.portalUrl === null) {
+          u.portalUrl = '';
+          needsSave = true;
+        }
+        if (u.macAddress === undefined || u.macAddress === null) {
+          u.macAddress = '';
+          needsSave = true;
+        }
+        return u;
+      });
+      
+      if (needsSave) {
+        logger.info('data', 'Migrating user data - adding missing fields');
+        this.saveUsers(data);
+      }
+      
+      return data;
     } catch (error) {
       logger.error('data', 'Error loading users', { error: error.message });
       const defaultUsers = this.createDefaultAdmin();
@@ -180,6 +200,8 @@ class UserService {
       id: u.id,
       username: u.username,
       role: u.role,
+      portalUrl: u.portalUrl || '',
+      macAddress: u.macAddress || '',
       hasPortalConfig: !!(u.portalUrl && u.macAddress),
       isActive: u.isActive,
       createdAt: u.createdAt,
