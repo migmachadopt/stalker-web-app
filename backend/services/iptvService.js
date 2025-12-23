@@ -63,12 +63,50 @@ class IPTVService {
             response: response.data
           };
         }
+        logger.info('iptv', `${username} - Path tried without token`, {
+          path: path || '(root)',
+          status: response.status,
+          location: response.headers?.location
+        });
       } catch (error) {
-        // Silent fail, try next path
+        logger.warn('iptv', `${username} - Path probe failed`, {
+          path: path || '(root)',
+          error: error.message,
+          status: error.response?.status,
+          location: error.response?.headers?.location
+        });
       }
     }
 
     return null;
+  }
+
+  async resolveBaseUrl(baseUrl, username) {
+    try {
+      const response = await axios.get(baseUrl, {
+        maxRedirects: 5,
+        timeout: 10000,
+        validateStatus: (status) => status < 400
+      });
+
+      // Axios follows redirects; final URL may be on response.request.res
+      const finalUrl = response.request?.res?.responseUrl || baseUrl;
+      const cleaned = finalUrl.replace(/\/$/, '');
+
+      if (cleaned !== baseUrl.replace(/\/$/, '')) {
+        logger.info('iptv', `${username} - Base URL redirected`, { from: baseUrl, to: cleaned });
+      }
+
+      return cleaned;
+    } catch (error) {
+      logger.warn('iptv', `${username} - Base URL probe failed`, {
+        baseUrl,
+        error: error.message,
+        status: error.response?.status,
+        location: error.response?.headers?.location
+      });
+      return baseUrl;
+    }
   }
 
   async connect(user) {
@@ -86,27 +124,26 @@ class IPTVService {
       .replace(/\/server.*$/, '')
       .replace(/\/c\/?$/, '');
 
-    // Check for redirects
-    try {
-      const checkRedirect = await axios.get(baseUrl, {
-        maxRedirects: 0,
-        validateStatus: (status) => status < 400,
-        timeout: 10000,
-      });
-
-      if (checkRedirect.status === 301 || checkRedirect.status === 302) {
-        const redirectUrl = checkRedirect.headers.location;
-        if (redirectUrl) baseUrl = redirectUrl.replace(/\/$/, '');
-      }
-    } catch (error) {
-      if (error.response?.status === 301 || error.response?.status === 302) {
-        const redirectUrl = error.response.headers.location;
-        if (redirectUrl) baseUrl = redirectUrl.replace(/\/$/, '');
-      }
+    // Ensure protocol; many users enter only host
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      baseUrl = `http://${baseUrl}`;
+      logger.info('iptv', `${user.username} - Added protocol to base URL`, { baseUrl });
     }
 
-    // Discover portal path
-    const discovery = await this.discoverPortalPath(baseUrl, user.macAddress, user.username);
+    // Follow redirects and log them
+    baseUrl = await this.resolveBaseUrl(baseUrl, user.username);
+
+    let discovery = await this.discoverPortalPath(baseUrl, user.macAddress, user.username);
+
+    if (!discovery && baseUrl.startsWith('http://')) {
+      const httpsBase = baseUrl.replace(/^http:\/\//i, 'https://');
+      logger.info('iptv', `${user.username} - Retrying with HTTPS`, { from: baseUrl, to: httpsBase });
+      const resolvedHttps = await this.resolveBaseUrl(httpsBase, user.username);
+      discovery = await this.discoverPortalPath(resolvedHttps, user.macAddress, user.username);
+      if (discovery) {
+        baseUrl = resolvedHttps;
+      }
+    }
 
     if (!discovery) {
       logger.logIPTVConnection(user.username, baseUrl, 'failed', { error: 'discovery_failed' });
@@ -165,9 +202,13 @@ class IPTVService {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
-      const genres = response.data?.js || [];
+      const rawGenres = response.data?.js;
+      const genres = Array.isArray(rawGenres) ? rawGenres : [];
       
-      logger.info('iptv', `${session.username} - Loaded ${genres.length} ${type} genres`);
+      logger.info('iptv', `${session.username} - Loaded ${genres.length} ${type} genres`, {
+        rawType: typeof rawGenres,
+        isArray: Array.isArray(rawGenres)
+      });
 
       return genres.map(g => ({
         id: g.id,
@@ -331,6 +372,27 @@ class IPTVService {
       logger.error('iptv', `${session.username} - Watchdog failed`, { error: error.message });
       throw error;
     }
+  }
+
+  startWatchdog(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) {
+      throw new Error('Invalid session');
+    }
+
+    // Clear any existing interval for this session
+    if (this.watchdogIntervals.has(sessionId)) {
+      clearInterval(this.watchdogIntervals.get(sessionId));
+    }
+
+    const interval = setInterval(() => {
+      this.watchdog(sessionId).catch((error) => {
+        logger.warn('iptv', `${session.username} - Watchdog tick failed`, { error: error.message });
+      });
+    }, config.WATCHDOG_INTERVAL);
+
+    this.watchdogIntervals.set(sessionId, interval);
+    logger.info('iptv', `${session.username} - Watchdog started`, { sessionId: sessionId.substring(0, 8) });
   }
 
   destroySession(sessionId) {
