@@ -5,6 +5,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const config = require('../config/constants');
+const staticGenres = require('../config/genres');
 const logger = require('../utils/logger');
 
 class IPTVService {
@@ -55,10 +56,24 @@ class IPTVService {
         });
 
         if (response.status === 200 && response.data?.js?.token) {
-          logger.info('iptv', `${username} - Portal path discovered`, { path: path || '(root)' });
+          // Capture the final URL after redirects (may include dynamic subpath e.g. /xxxx/portal.php)
+          const finalUrl = response.request?.res?.responseUrl 
+            || response.request?._redirectable?._currentUrl 
+            || testUrl;
+          let cleanPath = path || '(root)';
+          let fullUrl = `${baseUrl}${path}`;
+          try {
+            const parsed = new URL(finalUrl);
+            fullUrl = `${parsed.origin}${parsed.pathname}`;
+            cleanPath = parsed.pathname || cleanPath;
+          } catch (_) {
+            // fallback to original testUrl
+          }
+
+          logger.info('iptv', `${username} - Portal path discovered`, { path: cleanPath });
           return {
-            path,
-            fullUrl: `${baseUrl}${path}`,
+            path: cleanPath,
+            fullUrl,
             token: response.data.js.token,
             response: response.data
           };
@@ -203,7 +218,14 @@ class IPTVService {
       }
 
       const rawGenres = response.data?.js;
-      const genres = Array.isArray(rawGenres) ? rawGenres : [];
+      let genres = Array.isArray(rawGenres) ? rawGenres : [];
+
+      if (!Array.isArray(rawGenres)) {
+        logger.warn('iptv', `${session.username} - Genres not array, falling back to static config`, {
+          rawType: typeof rawGenres
+        });
+        genres = staticGenres;
+      }
       
       logger.info('iptv', `${session.username} - Loaded ${genres.length} ${type} genres`, {
         rawType: typeof rawGenres,
@@ -213,8 +235,9 @@ class IPTVService {
       return genres.map(g => ({
         id: g.id,
         title: g.title || g.name,
-        alias: g.alias,
-        censored: g.censored === "1"
+        alias: g.alias || (g.title || g.name || '').toLowerCase(),
+        censored: g.censored === "1" || g.censored === 1 || false,
+        number: g.number
       }));
 
     } catch (error) {
@@ -296,6 +319,19 @@ class IPTVService {
       total: totalItems,
       loaded: allChannels.length
     });
+
+    // Log unknown genre IDs
+    const knownGenreIds = new Set(staticGenres.map(g => g.id));
+    const unknownIds = new Set();
+    allChannels.forEach(ch => {
+      const gid = ch.tv_genre_id || 0;
+      if (gid && !knownGenreIds.has(gid)) {
+        unknownIds.add(gid);
+      }
+    });
+    if (unknownIds.size > 0) {
+      logger.error('iptv', `${session.username} - Unknown genre IDs encountered`, { ids: Array.from(unknownIds).join(',') });
+    }
 
     return {
       total: totalItems,

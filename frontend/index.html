@@ -8,6 +8,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
   <link rel="stylesheet" href="themes.css">
   
   <!-- API Module -->
@@ -21,6 +22,11 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
     
+    // Backend origin used for stream proxy (API_URL comes from api.js)
+    const BACKEND_ORIGIN = (window.API_URL || 'http://localhost:3001/api')
+      .replace(/\/+$/, '')
+      .replace(/\/api$/, '');
+
     function App() {
       // Auth state
       const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -263,15 +269,18 @@
           setLoadingProgress('Loading genres...');
           const genresData = await api.iptvGetGenres(sessionId, 'itv');
           
+          let localGenresMap = {};
           if (genresData.success) {
             // Create genres map
             const map = {};
             genresData.genres.forEach(g => {
               map[g.id] = {
                 name: g.title,
-                icon: utils?.getIconForGenre?.(g.title) || '📁'
+                icon: utils?.getIconForGenre?.(g.title) || '📁',
+                number: g.number
               };
             });
+            localGenresMap = map;
             setGenresMap(map);
           }
           
@@ -290,18 +299,25 @@
           chData.channels.forEach(ch => { 
             const gid = ch.tv_genre_id || 0; 
             if (!genreMap[gid]) {
-              const info = genresMap[gid] || { name: `Group ${gid}`, icon: '📁' }; 
+              const info = localGenresMap[gid] || { name: `Group ${gid}`, icon: '📁', number: Number.MAX_SAFE_INTEGER }; 
               genreMap[gid] = { 
                 id: gid, 
                 name: info.name, 
                 icon: info.icon, 
+                number: info.number ?? Number.MAX_SAFE_INTEGER,
                 count: 0 
               }; 
             } 
             genreMap[gid].count++; 
           });
           
-          setGenres(Object.values(genreMap).sort((a, b) => b.count - a.count));
+          setGenres(
+            Object.values(genreMap)
+              .sort((a, b) => {
+                if (a.number !== b.number) return a.number - b.number;
+                return a.name.localeCompare(b.name);
+              })
+          );
           
           // Start watchdog
           startWatchdog(sessionId);
@@ -374,72 +390,76 @@
             channel.name
           );
           
-          if (data.success && data.streamUrl) { 
-            loadStream(data.streamUrl); 
+          if (data.success && data.streamUrl) {
+            loadStream(data.streamUrl, data.streamType);
           }
         } catch (err) { 
           console.error('Stream error');
         }
       };
 
-      const loadStream = (streamUrl) => {
-        const video = videoRef.current; 
+      const loadStream = (streamUrl, streamType) => {
+        const video = videoRef.current;
         if (!video) return;
-        
+
         // Cleanup previous player
-        if (playerRef.current) { 
-          playerRef.current.destroy?.(); 
-          playerRef.current = null; 
+        if (playerRef.current) {
+          playerRef.current.destroy?.();
+          playerRef.current = null;
         }
-        
+
         video.removeAttribute('src');
         video.load();
-        
-        const absoluteUrl = streamUrl.startsWith('/') 
-          ? window.location.origin + streamUrl 
+
+        const absoluteUrl = streamUrl.startsWith('/')
+          ? `${BACKEND_ORIGIN}${streamUrl}`
           : streamUrl;
-        
-        // Check mpegts.js support
-        if (!mpegts || !mpegts.isSupported()) {
-          console.error('Video playback not supported');
-          return;
-        }
-        
-        // Disable logging
-        mpegts.LoggingControl.applyConfig({
-          enableAll: false
-        });
-        
-        // Create player
-        const player = mpegts.createPlayer({ 
-          type: 'flv', 
-          isLive: true, 
-          url: absoluteUrl
-        }, { 
-          enableWorker: false,
-          enableStashBuffer: true,
-          stashInitialSize: 384 * 1024,
-          isLive: true,
-          lazyLoad: false,
-          autoCleanupSourceBuffer: true,
-          enableLogging: false
-        });
-        
-        player.attachMediaElement(video); 
-        player.load();
-        
-        // Auto-play after buffer
-        setTimeout(() => {
-          if (video.readyState >= 1) {
+
+        video.oncanplay = () => { video.play().catch(() => {}); };
+
+        if (streamType === 'HLS') {
+          // HLS stream: native on Safari, HLS.js on Chrome/Firefox
+          if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = absoluteUrl;
             video.play().catch(() => {});
+          } else if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+            const hls = new Hls({ liveSyncDurationCount: 3, enableWorker: false });
+            hls.loadSource(absoluteUrl);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => { video.play().catch(() => {}); });
+            playerRef.current = hls;
           }
-        }, 3000);
-        
-        video.oncanplay = () => {
+        } else {
+          // MPEG-TS, FLV, or raw HTTP stream via mpegts.js
+          if (!mpegts || !mpegts.isSupported()) {
+            // Fallback to native video
+            video.src = absoluteUrl;
+            video.play().catch(() => {});
+            return;
+          }
+
+          mpegts.LoggingControl.applyConfig({ enableAll: false });
+
+          const player = mpegts.createPlayer({
+            type: 'mpegts',
+            isLive: true,
+            url: absoluteUrl
+          }, {
+            enableWorker: false,
+            enableStashBuffer: true,
+            stashInitialSize: 384 * 1024,
+            isLive: true,
+            lazyLoad: false,
+            autoCleanupSourceBuffer: true,
+            enableLogging: false
+          });
+
+          player.attachMediaElement(video);
+          player.load();
           video.play().catch(() => {});
-        };
-        
-        playerRef.current = player;
+
+          playerRef.current = player;
+        }
       };
 
       const toggleFullscreen = () => { 
