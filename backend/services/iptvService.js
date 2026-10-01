@@ -165,6 +165,16 @@ class IPTVService {
       throw new Error('Could not connect to IPTV portal');
     }
 
+    // The portal only authorizes a token after get_profile, and it must be the
+    // first call after the handshake - otherwise create_link returns no stream
+    await axios.get(
+      `${discovery.fullUrl}?type=stb&action=get_profile&JsHttpRequest=1-xml`,
+      {
+        headers: this.getStalkerHeaders(discovery.token, user.macAddress),
+        timeout: 15000,
+      }
+    );
+
     // Create session
     const sessionId = crypto.randomBytes(16).toString('hex');
     const session = {
@@ -265,15 +275,6 @@ class IPTVService {
 
     logger.logUserActivity(session.username, 'fetching channels');
 
-    // Get profile first
-    await axios.get(
-      `${session.portalUrl}?type=stb&action=get_profile&JsHttpRequest=1-xml`,
-      {
-        headers: this.getStalkerHeaders(session.token, session.macAddress),
-        timeout: 15000,
-      }
-    );
-
     let allChannels = [];
     let page = 1;
     let totalItems = 0;
@@ -372,9 +373,11 @@ class IPTVService {
 
     let streamUrl = response.data?.js?.cmd || response.data?.js || '';
 
-    if (typeof streamUrl === 'string') {
-      streamUrl = streamUrl.replace(/^ffmpeg\s+/i, '').replace(/^ffmpeg:/i, '').trim();
+    if (typeof streamUrl !== 'string' || !streamUrl) {
+      throw new Error('Portal did not return a stream link');
     }
+
+    streamUrl = streamUrl.replace(/^ffmpeg\s+/i, '').replace(/^ffmpeg:/i, '').trim();
 
     const urlLower = streamUrl.toLowerCase();
     let streamType = 'unknown';
