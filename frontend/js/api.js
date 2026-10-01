@@ -107,6 +107,25 @@ const api = {
     return this.iptvCall('/iptv/archive/stream', { channelId, ...window });
   },
   
+  // Video club ('vod') and series ('series')
+  async vodCategories(type) {
+    return this.iptvCall('/iptv/vod/categories', { type });
+  },
+  
+  // query: { category, page, search }
+  async vodList(type, query) {
+    return this.iptvCall('/iptv/vod/list', { type, ...query });
+  },
+  
+  async vodSeasons(seriesId) {
+    return this.iptvCall('/iptv/vod/seasons', { seriesId });
+  },
+  
+  // title: { cmd, episode?, title }
+  async vodStream(type, title) {
+    return this.iptvCall('/iptv/vod/stream', { type, ...title });
+  },
+  
   async iptvWatchdog() {
     return this.iptvCall('/iptv/watchdog');
   },

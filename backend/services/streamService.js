@@ -17,8 +17,9 @@ class StreamService {
     setInterval(() => this.cleanupTokens(), 70000);
   }
 
-  // `archive` (optional) turns the token into a seekable, downloadable archive
-  // window: { duration (seconds), filename, relink (async () => fresh url) }
+  // `archive` (optional) turns the token into a seekable, downloadable remote
+  // file: { filename, relink (async () => fresh url), duration (seconds, archive
+  // windows only), contentType (defaults to MPEG-TS) }
   generateStreamToken(userId, streamUrl, channelInfo, username, archive = null) {
     const token = encryption.generateStreamToken(userId, streamUrl, channelInfo, username);
 
@@ -83,9 +84,12 @@ class StreamService {
     upstreamResponse.data.pipe(res);
 
     req.on('close', () => {
-      logger.info('stream', `${token.username} - Client disconnected`, {
-        channel: token.channelInfo.name
-      });
+      // File playback opens and closes a connection per seek; only log live streams
+      if (!token.archive) {
+        logger.info('stream', `${token.username} - Client disconnected`, {
+          channel: token.channelInfo.name
+        });
+      }
       upstreamResponse.data.destroy();
     });
   }
@@ -148,7 +152,7 @@ class StreamService {
     }
   }
 
-  // Total size of the archive file, learned from a one-byte range request
+  // Total size of the remote file, learned from a one-byte range request
   async probeArchiveSize(url) {
     const probe = await this.fetchUpstream(url, 'bytes=0-0');
     probe.data.destroy();
@@ -156,14 +160,29 @@ class StreamService {
     const total = Number((probe.headers['content-range'] || '').split('/')[1]);
 
     if (probe.status >= 400 || !Number.isFinite(total) || total <= 0) {
-      throw new Error(`Archive not available (upstream ${probe.status})`);
+      throw new Error(`File not available (upstream ${probe.status})`);
     }
 
     return total;
   }
 
-  // Archive window: a fixed-size MPEG-TS file on the provider side.
-  //   ?start=<seconds>  play from that position (mapped to a byte offset)
+  // The provider link may have expired - ask the portal for a new one
+  async relinkArchive(token) {
+    const archive = token.archive;
+    if (!archive.relink) throw new Error('Link expired');
+
+    const streamUrl = await archive.relink();
+    const fresh = encryption.generateStreamToken(token.userId, streamUrl, token.channelInfo, token.username);
+    token.encryptedUrl = fresh.encryptedUrl;
+    token.iv = fresh.iv;
+    archive.totalBytes = null;
+
+    return streamUrl;
+  }
+
+  // Fixed-size file on the provider side: an archive window (MPEG-TS) or a
+  // video club title (MP4).
+  //   ?start=<seconds>  archive only: play from that position (mapped to a byte offset)
   //   ?download=1       send as a file attachment
   // Range requests from the client are honoured relative to the start offset.
   async handleArchive(token, req, res) {
@@ -174,25 +193,23 @@ class StreamService {
       try {
         archive.totalBytes = await this.probeArchiveSize(streamUrl);
       } catch (error) {
-        // The provider link may have expired - ask the portal for a new one, once
-        if (!archive.relink) throw error;
-
-        streamUrl = await archive.relink();
-        const fresh = encryption.generateStreamToken(token.userId, streamUrl, token.channelInfo, token.username);
-        token.encryptedUrl = fresh.encryptedUrl;
-        token.iv = fresh.iv;
+        streamUrl = await this.relinkArchive(token);
         archive.totalBytes = await this.probeArchiveSize(streamUrl);
       }
     }
 
-    const total = archive.totalBytes;
-    const startSeconds = Math.min(Math.max(Number(req.query.start) || 0, 0), archive.duration);
+    let total = archive.totalBytes;
+    const startSeconds = archive.duration
+      ? Math.min(Math.max(Number(req.query.start) || 0, 0), archive.duration)
+      : 0;
 
     // Bitrate is close to constant, so time maps to bytes; stay on a TS packet boundary
-    const base = Math.min(
-      Math.floor((startSeconds / archive.duration) * total / TS_PACKET_SIZE) * TS_PACKET_SIZE,
-      Math.max(total - TS_PACKET_SIZE, 0)
-    );
+    const base = startSeconds
+      ? Math.min(
+          Math.floor((startSeconds / archive.duration) * total / TS_PACKET_SIZE) * TS_PACKET_SIZE,
+          Math.max(total - TS_PACKET_SIZE, 0)
+        )
+      : 0;
     const available = total - base;
 
     let from = 0;
@@ -209,23 +226,33 @@ class StreamService {
       }
     }
 
-    logger.info('stream', `${token.username} - Starting archive proxy`, {
-      channel: token.channelInfo.name,
-      start: `${Math.round(startSeconds)}s`,
-      download: req.query.download === '1'
-    });
+    // Seeking in a film produces many range requests; only log the first of each kind
+    if (!rangeMatch || from === 0) {
+      logger.info('stream', `${token.username} - Starting file proxy`, {
+        channel: token.channelInfo.name,
+        start: `${Math.round(startSeconds)}s`,
+        download: req.query.download === '1'
+      });
+    }
 
-    const upstreamResponse = await this.fetchUpstream(streamUrl, `bytes=${base + from}-${base + to}`);
+    const range = `bytes=${base + from}-${base + to}`;
+    let upstreamResponse = await this.fetchUpstream(streamUrl, range);
 
     if (upstreamResponse.status >= 400) {
       upstreamResponse.data.destroy();
-      // Forget the size so the next request probes (and relinks) again
-      archive.totalBytes = null;
-      throw new Error(`Archive upstream responded ${upstreamResponse.status}`);
+      streamUrl = await this.relinkArchive(token);
+      upstreamResponse = await this.fetchUpstream(streamUrl, range);
+
+      if (upstreamResponse.status >= 400) {
+        upstreamResponse.data.destroy();
+        throw new Error(`File upstream responded ${upstreamResponse.status}`);
+      }
+
+      archive.totalBytes = total;
     }
 
     res.status(rangeMatch ? 206 : 200);
-    res.set('Content-Type', 'video/mp2t');
+    res.set('Content-Type', archive.contentType || 'video/mp2t');
     res.set('Accept-Ranges', 'bytes');
     res.set('Content-Length', String(to - from + 1));
     res.set('Access-Control-Allow-Origin', '*');

@@ -162,6 +162,7 @@
       const [groupsUpdatedAt, setGroupsUpdatedAt] = useState(null);
       const [groupsBusy, setGroupsBusy] = useState(false);
       const [groupsError, setGroupsError] = useState('');
+      const [sections, setSections] = useState([]);
 
       useEffect(() => {
         checkAuth();
@@ -280,6 +281,7 @@
       const applyGroupsResponse = (data) => {
         setGroups(sortGroups(data.groups));
         setGroupsUpdatedAt(data.updatedAt);
+        setSections(data.sections || []);
       };
 
       const openGroupsModal = async (u) => {
@@ -312,6 +314,7 @@
             const known = new Set(groups.map(g => g.id));
             applyGroupsResponse({
               ...data,
+              sections,
               groups: data.groups.map(g => known.has(g.id) ? { ...g, enabled: ticked.has(g.id) } : g)
             });
           } else {
@@ -335,7 +338,10 @@
         try {
           const data = await api.fetch(`/admin/users/${groupsUser.id}/groups`, {
             method: 'PUT',
-            body: JSON.stringify({ enabledGenres: groups.filter(g => g.enabled).map(g => g.id) })
+            body: JSON.stringify({
+              enabledGenres: groups.filter(g => g.enabled).map(g => g.id),
+              enabledSections: sections
+            })
           });
           
           if (data.success) {
@@ -466,9 +472,24 @@
           {groupsUser && (
             <div className="modal-overlay" onClick={() => setGroupsUser(null)}>
               <div className="modal" onClick={e => e.stopPropagation()}>
-                <h2>📂 Channel Groups — {groupsUser.username}</h2>
+                <h2>📂 Sections &amp; Channel Groups — {groupsUser.username}</h2>
                 
                 {groupsError && <div className="error-msg">{groupsError}</div>}
+                
+                <div className="groups-list" style={{marginBottom: '15px'}}>
+                  {[['vod', '🎬 Video Club'], ['series', '📽️ Series']].map(([id, label]) => (
+                    <label key={id}>
+                      <input
+                        type="checkbox"
+                        checked={groupsUser.role === 'admin' || sections.includes(id)}
+                        disabled={groupsUser.role === 'admin'}
+                        onChange={() => setSections(sections.includes(id) ? sections.filter(s => s !== id) : [...sections, id])}
+                      />
+                      <span className="title">{label}</span>
+                      <span className="count">{groupsUser.role === 'admin' ? 'always on for admins' : 'section'}</span>
+                    </label>
+                  ))}
+                </div>
                 
                 <div className="groups-toolbar">
                   <span className="meta">
@@ -507,7 +528,7 @@
                 
                 <div className="modal-actions">
                   <button type="button" className="btn btn-secondary" onClick={() => setGroupsUser(null)}>Cancel</button>
-                  <button type="button" className="btn btn-primary" onClick={saveGroups} disabled={groupsBusy || groups.length === 0}>Save</button>
+                  <button type="button" className="btn btn-primary" onClick={saveGroups} disabled={groupsBusy}>Save</button>
                 </div>
               </div>
             </div>

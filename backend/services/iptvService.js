@@ -566,6 +566,133 @@ class IPTVService {
     return link.replace(/^(ffmpeg|auto)\s+/i, '').trim();
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Video club & series
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Portal GET that renews the session once when the answer is not usable
+  async portalGet(sessionId, query, isValid) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+
+    const ask = async () => {
+      const response = await axios.get(
+        `${session.portalUrl}?${query}&JsHttpRequest=1-xml`,
+        {
+          headers: this.getStalkerHeaders(session.token, session.macAddress),
+          timeout: 20000
+        }
+      );
+      return response.data?.js;
+    };
+
+    let js = await ask();
+
+    if (!isValid(js)) {
+      await this.reauthorize(sessionId);
+      js = await ask();
+      if (!isValid(js)) throw new Error('Unexpected portal response');
+    }
+
+    return js;
+  }
+
+  // Key that identifies the portal, so cached catalogue pages can be shared
+  getPortalKey(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+    try {
+      return new URL(session.portalUrl).host;
+    } catch (_) {
+      return session.portalUrl;
+    }
+  }
+
+  mapVodItem(item) {
+    const year = String(item.year || '').slice(0, 4);
+    const minutes = Number(item.time);
+
+    return {
+      id: String(item.id),
+      name: item.name || item.o_name || '',
+      year: /^\d{4}$/.test(year) ? year : '',
+      minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : null,
+      rating: Number(item.rating_imdb) > 0 ? Number(Number(item.rating_imdb).toFixed(1)) : null,
+      genres: item.genres_str || '',
+      description: item.description || '',
+      director: item.director || '',
+      actors: item.actors || '',
+      poster: item.screenshot_uri || item.pic || '',
+      added: item.added || '',
+      hd: Number(item.hd) === 1,
+      isSeries: Number(item.is_series) === 1,
+      cmd: item.cmd || ''
+    };
+  }
+
+  // type: 'vod' (films) or 'series'
+  async getVodCategories(sessionId, type) {
+    const js = await this.portalGet(sessionId, `type=${type}&action=get_categories`, Array.isArray);
+
+    return js
+      .filter(c => String(c.id) !== '*' && Number(c.censored) !== 1)
+      .map(c => ({ id: String(c.id), title: c.title || c.alias || `Category ${c.id}` }));
+  }
+
+  async getVodList(sessionId, type, { category = '*', page = 1, search = '' } = {}) {
+    const params = [
+      `type=${type}`,
+      'action=get_ordered_list',
+      `category=${encodeURIComponent(category)}`,
+      'genre=0',
+      `p=${page}`,
+      'sortby=added'
+    ];
+    if (search) params.push(`search=${encodeURIComponent(search)}`);
+
+    const js = await this.portalGet(sessionId, params.join('&'), v => v && Array.isArray(v.data));
+
+    return {
+      total: Number(js.total_items) || 0,
+      pageSize: Number(js.max_page_items) || js.data.length || 14,
+      page,
+      items: js.data.filter(item => Number(item.censored) !== 1).map(item => this.mapVodItem(item))
+    };
+  }
+
+  // Seasons of a series, each with its episode numbers
+  async getSeriesSeasons(sessionId, seriesId) {
+    const js = await this.portalGet(
+      sessionId,
+      `type=series&action=get_ordered_list&movie_id=${encodeURIComponent(seriesId)}&season_id=0&episode_id=0&p=1`,
+      v => v && Array.isArray(v.data)
+    );
+
+    return js.data
+      .map(season => ({
+        id: String(season.id),
+        name: season.name || '',
+        cmd: season.cmd || '',
+        episodes: (Array.isArray(season.series) ? season.series : []).map(Number).filter(Number.isFinite)
+      }))
+      .filter(season => season.cmd && season.episodes.length)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  }
+
+  // Provider link for a film, or for one episode of a season
+  async createVodLink(sessionId, cmd, episode = '') {
+    const link = await this.requestLink(
+      sessionId,
+      `type=vod&action=create_link&cmd=${encodeURIComponent(cmd)}&series=${encodeURIComponent(episode)}&forced_storage=&disable_ad=0&download=0`
+    );
+
+    if (!link) {
+      throw new Error('Portal did not return a link for this title');
+    }
+
+    return link.replace(/^(ffmpeg|auto)\s+/i, '').trim();
+  }
+
   async watchdog(sessionId) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error('Invalid session');

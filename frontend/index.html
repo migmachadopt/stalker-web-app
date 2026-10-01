@@ -25,6 +25,448 @@
     // Backend origin used for stream proxy (API_URL comes from api.js)
     const BACKEND_ORIGIN = new URL(API_URL, window.location.href).origin;
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // VIDEO CLUB & SERIES BROWSER
+    // ═══════════════════════════════════════════════════════════════════════
+
+    const POSTER_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 300"><rect fill="%231a1f2e" width="200" height="300"/><text x="100" y="160" text-anchor="middle" fill="%235b7cff" font-size="48">🎬</text></svg>';
+
+    function VodCard({ item, onOpen }) {
+      return (
+        <div className="vod-card" onClick={() => onOpen(item)} title={item.name}>
+          <img
+            src={item.poster || POSTER_FALLBACK}
+            alt=""
+            loading="lazy"
+            onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }}
+          />
+          <div className="vod-card-info">
+            <div className="vod-card-name">{item.name}</div>
+            <div className="vod-card-meta">
+              {[item.year, item.rating ? `★ ${item.rating}` : ''].filter(Boolean).join(' · ')}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function VodRow({ title, row, onOpen, onSeeAll }) {
+      const scroller = useRef(null);
+      const scrollBy = (direction) => {
+        const el = scroller.current;
+        if (el) el.scrollBy({ left: direction * el.clientWidth * 0.85, behavior: 'smooth' });
+      };
+
+      if (row && row.items.length === 0) return null;
+
+      return (
+        <div className="vod-row">
+          <div className="vod-row-header">
+            <h3>{title}</h3>
+            {row && <button onClick={onSeeAll}>See all{row.total ? ` (${row.total})` : ''} ›</button>}
+          </div>
+          <div className="vod-row-body">
+            <button className="vod-row-arrow left" onClick={() => scrollBy(-1)}>‹</button>
+            <div className="vod-row-scroller" ref={scroller}>
+              {row
+                ? row.items.map(item => <VodCard key={item.id} item={item} onOpen={onOpen} />)
+                : Array.from({ length: 8 }, (_, i) => <div key={i} className="vod-card skeleton"></div>)}
+            </div>
+            <button className="vod-row-arrow right" onClick={() => scrollBy(1)}>›</button>
+          </div>
+        </div>
+      );
+    }
+
+    // type: 'vod' (video club) or 'series'
+    function VodBrowser({ type }) {
+      const isSeries = type === 'series';
+      const sectionTitle = isSeries ? 'Series' : 'Video Club';
+
+      const [categories, setCategories] = useState([]);
+      const [rows, setRows] = useState({});          // category id -> { items, total }
+      const [error, setError] = useState('');
+      const [searchTerm, setSearchTerm] = useState('');
+      const [grid, setGrid] = useState(null);        // { title, category?, search?, items, total, page, pageSize, loading }
+      const [detail, setDetail] = useState(null);
+      const [seasons, setSeasons] = useState(null);
+      const [seasonIndex, setSeasonIndex] = useState(0);
+      const [detailError, setDetailError] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [playing, setPlaying] = useState(null);  // { title, streamUrl, key }
+      const [playerError, setPlayerError] = useState('');
+      const videoRef = useRef(null);
+      const gridRequest = useRef(0);
+      const lastSaved = useRef(0);
+
+      const pad2 = (n) => String(n).padStart(2, '0');
+
+      // Home: categories, then one row per category, loaded one after the other
+      useEffect(() => {
+        let cancelled = false;
+
+        (async () => {
+          try {
+            const data = await api.vodCategories(type);
+            if (!data.success) throw new Error(data.error || 'Failed to load categories');
+            if (cancelled) return;
+
+            const all = [{ id: '*', title: 'Recently added' }, ...data.categories];
+            setCategories(all);
+
+            for (const category of all) {
+              const list = await api.vodList(type, { category: category.id, page: 1 });
+              if (cancelled) return;
+              setRows(prev => ({
+                ...prev,
+                [category.id]: list.success ? { items: list.items, total: list.total } : { items: [], total: 0 }
+              }));
+            }
+          } catch (err) {
+            if (!cancelled) setError(err.message || 'Failed to load');
+          }
+        })();
+
+        return () => { cancelled = true; };
+      }, [type]);
+
+      const loadGridPage = async (spec, page, previous) => {
+        const requestId = ++gridRequest.current;
+        setGrid({ ...spec, items: previous, page: page - 1, loading: true, error: '' });
+
+        let data;
+        try {
+          data = await api.vodList(type, { category: spec.category, search: spec.search, page });
+        } catch (err) {
+          data = { success: false, error: 'Failed to load titles' };
+        }
+        if (gridRequest.current !== requestId) return;
+
+        if (!data.success) {
+          setGrid({ ...spec, items: previous, page: page - 1, loading: false, error: data.error });
+          return;
+        }
+
+        setGrid({
+          ...spec,
+          items: previous.concat(data.items),
+          total: data.total,
+          pageSize: data.pageSize,
+          page,
+          loading: false,
+          error: ''
+        });
+      };
+
+      const openGrid = (spec) => loadGridPage({ ...spec, total: 0, pageSize: 14 }, 1, []);
+
+      const closeGrid = () => {
+        gridRequest.current++;
+        setGrid(null);
+        setSearchTerm('');
+      };
+
+      const gridHasMore = grid && !grid.loading && grid.page * grid.pageSize < grid.total;
+
+      const handleGridScroll = (e) => {
+        const el = e.currentTarget;
+        if (gridHasMore && el.scrollTop + el.clientHeight > el.scrollHeight - 600) {
+          loadGridPage(grid, grid.page + 1, grid.items);
+        }
+      };
+
+      // Search by name, as the user types
+      useEffect(() => {
+        const term = searchTerm.trim();
+
+        if (term.length < 2) {
+          if (grid && grid.search) { gridRequest.current++; setGrid(null); }
+          return;
+        }
+
+        const timer = setTimeout(() => openGrid({ title: `Results for "${term}"`, search: term }), 400);
+        return () => clearTimeout(timer);
+      }, [searchTerm]);
+
+      const openDetail = async (item) => {
+        setDetail(item);
+        setDetailError('');
+        setSeasons(null);
+        setSeasonIndex(0);
+
+        if (!isSeries) return;
+
+        try {
+          const data = await api.vodSeasons(item.id);
+          if (!data.success) throw new Error(data.error || 'Failed to load seasons');
+          setSeasons(data.seasons);
+        } catch (err) {
+          setSeasons([]);
+          setDetailError(err.message);
+        }
+      };
+
+      const positionKey = (item, season, episode) =>
+        `vodpos:${type}:${item.id}:${season ? `${season.id}:${episode}` : ''}`;
+
+      const savedPosition = (item, season, episode) => {
+        try { return Number(localStorage.getItem(positionKey(item, season, episode))) || 0; } catch (_) { return 0; }
+      };
+
+      const requestTitle = async (item, season, episode) => {
+        const title = season
+          ? `${item.name} - ${season.name} E${pad2(episode)}`
+          : `${item.name}${item.year && !item.name.includes(item.year) ? ` (${item.year})` : ''}`;
+
+        const data = await api.vodStream(type, {
+          cmd: season ? season.cmd : item.cmd,
+          episode: season ? episode : undefined,
+          title
+        });
+        if (!data.success) throw new Error(data.error || 'This title is not available');
+
+        return { title, streamUrl: data.streamUrl, key: positionKey(item, season, episode) };
+      };
+
+      const playTitle = async (item, season, episode) => {
+        if (busy) return;
+        setBusy(true);
+        setDetailError('');
+        try {
+          setPlayerError('');
+          setPlaying(await requestTitle(item, season, episode));
+        } catch (err) {
+          setDetailError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const downloadTitle = async (item, season, episode) => {
+        if (busy) return;
+        setBusy(true);
+        setDetailError('');
+        try {
+          const title = await requestTitle(item, season, episode);
+          const link = document.createElement('a');
+          link.href = `${BACKEND_ORIGIN}${title.streamUrl}?download=1`;
+          link.download = '';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        } catch (err) {
+          setDetailError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const closePlayer = () => {
+        const video = videoRef.current;
+        if (video) {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
+        setPlaying(null);
+      };
+
+      // Continue where the viewer left off
+      const handleLoadedMetadata = (e) => {
+        const video = e.currentTarget;
+        let saved = 0;
+        try { saved = Number(localStorage.getItem(playing.key)) || 0; } catch (_) {}
+        if (saved > 30 && (!isFinite(video.duration) || saved < video.duration - 60)) {
+          video.currentTime = saved;
+        }
+      };
+
+      const handleTimeUpdate = (e) => {
+        const video = e.currentTarget;
+        if (Math.abs(video.currentTime - lastSaved.current) < 5) return;
+        lastSaved.current = video.currentTime;
+        try { localStorage.setItem(playing.key, String(Math.floor(video.currentTime))); } catch (_) {}
+      };
+
+      // Escape closes the innermost layer
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.key !== 'Escape') return;
+          if (playing) closePlayer();
+          else if (detail) setDetail(null);
+          else if (grid) closeGrid();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [playing, detail, grid]);
+
+      const heroRow = categories.slice(1).map(c => rows[c.id]).find(r => r && r.items.length) || rows['*'];
+      const hero = heroRow && heroRow.items[0];
+      const season = seasons && seasons[seasonIndex];
+
+      const meta = (item) => [
+        item.year,
+        item.minutes ? `${Math.floor(item.minutes / 60)}h ${pad2(item.minutes % 60)}m` : '',
+        item.rating ? `★ ${item.rating}` : '',
+        item.hd ? 'HD' : ''
+      ].filter(Boolean);
+
+      return (
+        <div className="vod-browser">
+          <div className="vod-topbar">
+            {grid && <button className="vod-back" onClick={closeGrid} title="Back">←</button>}
+            <h2>{grid ? grid.title : sectionTitle}</h2>
+            <div className="search-container vod-search">
+              <span className="search-icon">🔍</span>
+              <input
+                type="text"
+                className="search-input"
+                placeholder={isSeries ? 'Search series by name...' : 'Search films by name...'}
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+          </div>
+
+          {error && <div className="vod-message"><div className="error-msg">{error}</div></div>}
+
+          {grid ? (
+            <div className="vod-scroll" onScroll={handleGridScroll}>
+              {grid.total > 0 && <div className="vod-grid-count">{grid.total} titles</div>}
+              <div className="vod-grid">
+                {grid.items.map(item => <VodCard key={item.id} item={item} onOpen={openDetail} />)}
+                {grid.loading && Array.from({ length: 7 }, (_, i) => <div key={`s${i}`} className="vod-card skeleton"></div>)}
+              </div>
+              {grid.error && <div className="vod-message"><div className="error-msg">{grid.error}</div></div>}
+              {!grid.loading && grid.items.length === 0 && !grid.error && (
+                <div className="vod-message">No titles found.</div>
+              )}
+              {gridHasMore && (
+                <div className="vod-more">
+                  <button className="btn btn-secondary" onClick={() => loadGridPage(grid, grid.page + 1, grid.items)}>Load more</button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="vod-scroll">
+              {hero && (
+                <div className="vod-hero">
+                  <div className="vod-hero-backdrop" style={{ backgroundImage: `url("${hero.poster}")` }}></div>
+                  <img className="vod-hero-poster" src={hero.poster || POSTER_FALLBACK} alt=""
+                    onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
+                  <div className="vod-hero-text">
+                    <h1>{hero.name}</h1>
+                    <div className="vod-meta">{meta(hero).map(m => <span key={m}>{m}</span>)}</div>
+                    <p>{hero.description}</p>
+                    <div className="vod-actions">
+                      {!isSeries && <button className="vod-play" disabled={busy} onClick={() => playTitle(hero)}>▶ Play</button>}
+                      <button className="vod-secondary" onClick={() => openDetail(hero)}>{isSeries ? '▶ Episodes' : 'ⓘ More info'}</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {categories.map(category => (
+                <VodRow
+                  key={category.id}
+                  title={category.title}
+                  row={rows[category.id]}
+                  onOpen={openDetail}
+                  onSeeAll={() => openGrid({ title: category.title, category: category.id })}
+                />
+              ))}
+            </div>
+          )}
+
+          {detail && !playing && (
+            <div className="modal-overlay" onClick={() => setDetail(null)}>
+              <div className="modal vod-detail" onClick={e => e.stopPropagation()}>
+                <button className="vod-close" onClick={() => setDetail(null)} title="Close">×</button>
+                <div className="vod-detail-top">
+                  <img src={detail.poster || POSTER_FALLBACK} alt=""
+                    onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
+                  <div className="vod-detail-text">
+                    <h2>{detail.name}</h2>
+                    <div className="vod-meta">{meta(detail).map(m => <span key={m}>{m}</span>)}</div>
+                    {detail.genres && <div className="vod-genres">{detail.genres}</div>}
+                    <p>{detail.description}</p>
+                    {detail.director && <div className="vod-credits"><strong>Director:</strong> {detail.director}</div>}
+                    {detail.actors && <div className="vod-credits"><strong>Cast:</strong> {detail.actors}</div>}
+
+                    {!isSeries && (
+                      <div className="vod-actions">
+                        <button className="vod-play" disabled={busy} onClick={() => playTitle(detail)}>
+                          {savedPosition(detail) > 30 ? '▶ Resume' : '▶ Play'}
+                        </button>
+                        <button className="vod-secondary" disabled={busy} onClick={() => downloadTitle(detail)}>⬇ Download</button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {detailError && <div className="error-msg">{detailError}</div>}
+
+                {isSeries && (
+                  <div className="vod-episodes">
+                    {seasons === null && <div className="vod-message">Loading seasons...</div>}
+                    {seasons && seasons.length === 0 && !detailError && <div className="vod-message">No episodes available.</div>}
+                    {seasons && seasons.length > 0 && (
+                      <React.Fragment>
+                        <div className="vod-seasons">
+                          {seasons.map((s, i) => (
+                            <button
+                              key={s.id}
+                              className={`theme-option ${i === seasonIndex ? 'active' : ''}`}
+                              onClick={() => setSeasonIndex(i)}
+                            >
+                              {s.name}
+                            </button>
+                          ))}
+                        </div>
+                        <div className="vod-episode-list">
+                          {season.episodes.map(episode => (
+                            <div key={episode} className="archive-row">
+                              <span className="archive-time">E{pad2(episode)}</span>
+                              <span className="archive-name">
+                                Episode {episode}
+                                {savedPosition(detail, season, episode) > 30 && <em className="vod-resume"> · in progress</em>}
+                              </span>
+                              <span className="archive-actions">
+                                <button title="Play" disabled={busy} onClick={() => playTitle(detail, season, episode)}>▶</button>
+                                <button title="Download" disabled={busy} onClick={() => downloadTitle(detail, season, episode)}>⬇</button>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </React.Fragment>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {playing && (
+            <div className="vod-player">
+              <div className="vod-player-bar">
+                <button className="vod-back" onClick={closePlayer} title="Back">←</button>
+                <span>{playing.title}</span>
+              </div>
+              <video
+                ref={videoRef}
+                src={`${BACKEND_ORIGIN}${playing.streamUrl}`}
+                controls
+                autoPlay
+                onLoadedMetadata={handleLoadedMetadata}
+                onTimeUpdate={handleTimeUpdate}
+                onError={() => setPlayerError('This title cannot be played by this browser. Go back and download it instead.')}
+              />
+              {playerError && <div className="player-notice">{playerError}</div>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function App() {
       // Auth state
       const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -33,6 +475,7 @@
       
       // UI state
       const [screen, setScreen] = useState('login');
+      const [section, setSection] = useState('tv'); // 'tv' | 'vod' | 'series'
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
       const [loadingProgress, setLoadingProgress] = useState('');
@@ -240,6 +683,7 @@
         setCurrentChannel(null); 
         setArchiveChannel(null);
         setArchivePlayback(null);
+        setSection('tv');
         setScreen('login');
         setError('');
         setSuccess('');
@@ -735,6 +1179,22 @@
         setSeekDraft(null);
       };
 
+      // The provider allows one stream per account: leaving live TV stops it
+      const switchSection = (next) => {
+        if (next === section) return;
+        
+        cancelLiveRetry();
+        setPlayerNotice('');
+        if (playerRef.current) {
+          playerRef.current.destroy?.();
+          playerRef.current = null;
+        }
+        setCurrentChannel(null);
+        setArchivePlayback(null);
+        setArchiveChannel(null);
+        setSection(next);
+      };
+
       const toggleFullscreen = () => { 
         if (isFullscreen) {
           document.exitFullscreen();
@@ -829,9 +1289,13 @@
         <div className="app-layout">
           {/* Navigation Rail */}
           <div className="nav-rail">
-            <div className="nav-item active" title="TV Channels">📺</div>
-            <div className="nav-item" title="Movies (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>🎬</div>
-            <div className="nav-item" title="Series (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>📽️</div>
+            <div className={`nav-item ${section === 'tv' ? 'active' : ''}`} title="TV Channels" onClick={() => switchSection('tv')}>📺</div>
+            {user?.sections?.vod && (
+              <div className={`nav-item ${section === 'vod' ? 'active' : ''}`} title="Video Club" onClick={() => switchSection('vod')}>🎬</div>
+            )}
+            {user?.sections?.series && (
+              <div className={`nav-item ${section === 'series' ? 'active' : ''}`} title="Series" onClick={() => switchSection('series')}>📽️</div>
+            )}
             <div className="nav-divider"></div>
             <div className="nav-item" title="EPG Guide (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>📅</div>
             <div className="nav-divider"></div>
@@ -844,6 +1308,10 @@
             <div className="nav-item nav-item-danger" title="Sign Out" onClick={handleLogout}>🚪</div>
           </div>
 
+          {section !== 'tv' && <VodBrowser key={section} type={section} />}
+
+          {section === 'tv' && (
+          <React.Fragment>
           {/* Sidebar */}
           <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
             <div className="sidebar-header">
@@ -1051,6 +1519,9 @@
             </div>
           </div>
           
+          </React.Fragment>
+          )}
+
           {/* Archive Modal */}
           {archiveChannel && (
             <div className="modal-overlay" onClick={() => setArchiveChannel(null)}>

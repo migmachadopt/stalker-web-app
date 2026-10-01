@@ -30,6 +30,9 @@ module.exports = {
   ARCHIVE_TOKEN_EXPIRY: 12 * 60 * 60 * 1000, // 12 hours
   ARCHIVE_MAX_WINDOW: 12 * 60 * 60, // 12 hours, in seconds
 
+  // Video club & series catalogue
+  VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes
+
   // IPTV
   STALKER_HEADERS: {
     'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2738 Mobile Safari/533.3',

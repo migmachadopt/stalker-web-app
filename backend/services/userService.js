@@ -149,6 +149,9 @@ class UserService {
     if (updates.macAddress !== undefined) user.macAddress = updates.macAddress;
     if (updates.isActive !== undefined) user.isActive = updates.isActive;
     if (Array.isArray(updates.enabledGenres)) user.enabledGenres = updates.enabledGenres.map(String);
+    if (Array.isArray(updates.enabledSections)) {
+      user.enabledSections = updates.enabledSections.filter(s => ['vod', 'series'].includes(s));
+    }
 
     user.updatedAt = new Date().toISOString();
     

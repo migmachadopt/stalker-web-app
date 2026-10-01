@@ -12,6 +12,7 @@ const iptvService = require('./services/iptvService');
 const streamService = require('./services/streamService');
 const channelListService = require('./services/channelListService');
 const archiveService = require('./services/archiveService');
+const vodService = require('./services/vodService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -68,7 +69,8 @@ app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
         id: user.id,
         username: user.username,
         role: user.role,
-        hasPortalConfig: !!(user.portalUrl && user.macAddress)
+        hasPortalConfig: !!(user.portalUrl && user.macAddress),
+        sections: vodService.getSections(user)
       }
     });
     
@@ -93,6 +95,7 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
         username: user.username,
         role: user.role,
         hasPortalConfig: !!(user.portalUrl && user.macAddress),
+        sections: vodService.getSections(user),
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
       }
@@ -315,7 +318,7 @@ app.get('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, re
       return res.status(404).json({ success: false, error: 'User not found' });
     }
 
-    res.json({ success: true, ...channelListService.getGroups(user) });
+    res.json({ success: true, ...channelListService.getGroups(user), sections: user.enabledSections || [] });
 
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to get channel groups' });
@@ -324,19 +327,19 @@ app.get('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, re
 
 app.put('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, res) => {
   try {
-    const { enabledGenres } = req.body;
+    const { enabledGenres, enabledSections } = req.body;
 
     if (!Array.isArray(enabledGenres)) {
       return res.status(400).json({ success: false, error: 'enabledGenres must be an array' });
     }
 
-    const updatedUser = userService.updateUser(req.params.id, { enabledGenres });
+    const updatedUser = userService.updateUser(req.params.id, { enabledGenres, enabledSections });
 
     logger.logUserActivity('admin', `updated channel groups of ${updatedUser.username}`, {
       enabled: updatedUser.enabledGenres.length
     });
 
-    res.json({ success: true, ...channelListService.getGroups(updatedUser) });
+    res.json({ success: true, ...channelListService.getGroups(updatedUser), sections: updatedUser.enabledSections || [] });
 
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
@@ -355,7 +358,7 @@ app.post('/api/admin/users/:id/groups/refresh', authMiddleware, adminMiddleware,
 
     logger.logUserActivity('admin', `refreshed channel list of ${user.username}`);
 
-    res.json({ success: true, ...channelListService.getGroups(user) });
+    res.json({ success: true, ...channelListService.getGroups(user), sections: user.enabledSections || [] });
 
   } catch (error) {
     logger.error('iptv', 'Admin channel list refresh error', { error: error.message });
@@ -580,6 +583,130 @@ app.post('/api/iptv/archive/stream', authMiddleware, async (req, res) => {
   } catch (error) {
     logger.error('stream', 'Archive request error', { error: error.message });
     res.status(500).json({ success: false, error: 'Failed to get archive stream' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Video club & series
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Resolves the session and checks the user may use that section ('vod' | 'series')
+function vodContext(req, res) {
+  const { sessionId, type } = req.body;
+  const session = iptvService.getSession(sessionId);
+  
+  if (!session) {
+    res.status(410).json({ success: false, error: 'Invalid IPTV session' });
+    return null;
+  }
+  
+  if (session.userId !== req.user.userId) {
+    res.status(403).json({ success: false, error: 'Session access denied' });
+    return null;
+  }
+  
+  const user = userService.findUserById(req.user.userId);
+  
+  if (!user || !vodService.canAccess(user, type)) {
+    res.status(403).json({ success: false, error: 'This section is not enabled for your account' });
+    return null;
+  }
+  
+  return { sessionId, session, user, type };
+}
+
+app.post('/api/iptv/vod/categories', authMiddleware, async (req, res) => {
+  try {
+    const ctx = vodContext(req, res);
+    if (!ctx) return;
+    
+    const categories = await vodService.getCategories(ctx.sessionId, ctx.type);
+    
+    res.json({ success: true, type: ctx.type, categories });
+    
+  } catch (error) {
+    logger.error('iptv', 'VOD categories error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to load categories' });
+  }
+});
+
+app.post('/api/iptv/vod/list', authMiddleware, async (req, res) => {
+  try {
+    const ctx = vodContext(req, res);
+    if (!ctx) return;
+    
+    const { category, page, search } = req.body;
+    const result = await vodService.getList(ctx.sessionId, ctx.type, { category, page, search });
+    
+    res.json({ success: true, type: ctx.type, ...result });
+    
+  } catch (error) {
+    logger.error('iptv', 'VOD list error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to load titles' });
+  }
+});
+
+app.post('/api/iptv/vod/seasons', authMiddleware, async (req, res) => {
+  try {
+    req.body.type = 'series';
+    const ctx = vodContext(req, res);
+    if (!ctx) return;
+    
+    const seasons = await vodService.getSeasons(ctx.sessionId, String(req.body.seriesId || ''));
+    
+    res.json({ success: true, seasons });
+    
+  } catch (error) {
+    logger.error('iptv', 'Series seasons error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to load seasons' });
+  }
+});
+
+// Film (cmd) or episode (season cmd + episode number) as a seekable, downloadable file
+app.post('/api/iptv/vod/stream', authMiddleware, async (req, res) => {
+  try {
+    const ctx = vodContext(req, res);
+    if (!ctx) return;
+    
+    const { cmd, episode, title } = req.body;
+    
+    if (typeof cmd !== 'string' || !cmd || cmd.length > 2000) {
+      return res.status(400).json({ success: false, error: 'Missing title reference' });
+    }
+    
+    const episodeNumber = ctx.type === 'series' ? String(parseInt(episode, 10) || '') : '';
+    
+    if (ctx.type === 'series' && !episodeNumber) {
+      return res.status(400).json({ success: false, error: 'Missing episode number' });
+    }
+    
+    const link = await iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber);
+    const { extension, contentType } = vodService.describeLink(link);
+    const safeTitle = String(title || 'video').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'video';
+    
+    const streamToken = streamService.generateStreamToken(
+      req.user.userId,
+      link,
+      { id: cmd.slice(0, 24), name: safeTitle, type: 'VOD' },
+      ctx.session.username,
+      {
+        contentType,
+        filename: `${safeTitle}.${extension}`,
+        relink: () => iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber)
+      }
+    );
+    
+    logger.logUserActivity(ctx.session.username, `requesting ${ctx.type}`, { title: safeTitle });
+    
+    res.json({
+      success: true,
+      streamUrl: `/api/stream/${streamToken}`,
+      contentType
+    });
+    
+  } catch (error) {
+    logger.error('stream', 'VOD stream request error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to get this title' });
   }
 });
 
