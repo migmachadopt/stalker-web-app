@@ -649,6 +649,17 @@
         return () => clearTimeout(recoveryRef.current.stallTimer);
       }, [playing && playing.streamUrl]);
 
+      // Leaving the section with a film open must end its download too: a video
+      // element that is merely removed from the page keeps its connection
+      React.useLayoutEffect(() => () => {
+        const video = videoRef.current;
+        if (video) {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
+      }, []);
+
       // Continue where the viewer left off
       const handleLoadedMetadata = (e) => {
         const video = e.currentTarget;

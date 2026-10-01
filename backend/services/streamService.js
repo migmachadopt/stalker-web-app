@@ -265,9 +265,9 @@ class StreamService {
     this.pipeFile(token, req, res, upstreamResponse, base + from, base + to);
   }
 
-  // Open a byte range of the provider file. The provider now and then refuses a
-  // request made right after another one, and links expire: wait and ask again,
-  // then get a fresh link from the portal before giving up.
+  // Open a byte range of the provider file. A link stops working once the
+  // provider has closed its connection (it then answers 404), so a refusal is
+  // answered with a fresh link from the portal, and one more try after a pause.
   async openFile(token, first, last) {
     const range = `bytes=${first}-${last}`;
     let status = 0;
@@ -275,12 +275,12 @@ class StreamService {
     for (let attempt = 1; attempt <= 3; attempt++) {
       let url = encryption.decryptStreamUrl(token.encryptedUrl, token.iv);
 
-      if (attempt === 3) {
+      if (attempt > 1) {
+        if (attempt === 3) await new Promise(resolve => setTimeout(resolve, 1500));
+
         const size = token.archive.totalBytes;
         url = await this.relinkArchive(token);
         token.archive.totalBytes = size;
-      } else if (attempt === 2) {
-        await new Promise(resolve => setTimeout(resolve, 1200));
       }
 
       const response = await this.fetchUpstream(url, range);
@@ -321,39 +321,43 @@ class StreamService {
     let heldBytes = 0;
     let current = null;
     let clientClosed = false;
+    let clientBusy = false;      // the player has not taken what was sent yet
+    let pendingResume = null;    // interruption to recover from once it has
     let resumes = 0;
 
     const forward = (chunk) => {
       // Embedded subtitles are picked out of the bytes on their way to the player
       if (token.archive.subtitles) subtitleService.feed(token.archive.subtitles, sent, chunk);
       sent += chunk.length;
-      return res.write(chunk);
+      if (!res.write(chunk)) clientBusy = true;
     };
 
     // Forward held chunks while at least `keep` bytes stay behind
     const release = (keep) => {
-      let flowing = true;
       while (held.length && heldBytes - held[0].length >= keep) {
         const chunk = held.shift();
         heldBytes -= chunk.length;
-        flowing = forward(chunk) && flowing;
+        forward(chunk);
       }
-      return flowing;
     };
 
-    const resume = async (reason) => {
+    // `expected`: the provider connection lapsed while the player was not
+    // reading (buffer full, paused, tab left open) - not a failure
+    const resume = async (reason, expected = false) => {
       if (clientClosed) return;
 
-      if (++resumes > 5) {
-        logger.error('stream', 'File stream lost', { channel: token.channelInfo.name, reason });
-        return res.destroy();
-      }
+      if (!expected) {
+        if (++resumes > 5) {
+          logger.error('stream', 'File stream lost', { channel: token.channelInfo.name, reason });
+          return res.destroy();
+        }
 
-      logger.warn('stream', 'File stream interrupted, resuming', {
-        channel: token.channelInfo.name,
-        reason,
-        at: received
-      });
+        logger.warn('stream', 'File stream interrupted, resuming', {
+          channel: token.channelInfo.name,
+          reason,
+          at: received
+        });
+      }
 
       try {
         const next = await this.openFile(token, received, last);
@@ -389,7 +393,18 @@ class StreamService {
         received -= tail.length - valid.length;
         if (valid.length) forward(valid);
 
-        resume(notice >= 0 ? 'provider closed the connection (account in use elsewhere)' : reason);
+        if (notice >= 0) {
+          return resume('provider closed the connection (account in use elsewhere)');
+        }
+
+        // The player is not reading: do not hold a provider connection for it.
+        // The transfer continues when it asks for more.
+        if (clientBusy) {
+          pendingResume = reason;
+          return;
+        }
+
+        resume(reason);
       };
 
       response.data.on('data', (chunk) => {
@@ -398,15 +413,26 @@ class StreamService {
         received += chunk.length;
         resumes = 0;
 
+        release(config.FILE_HOLD_BYTES);
+
         // Respect a slow client: stop reading until it has taken what was sent
-        if (!release(config.FILE_HOLD_BYTES) && !response.data.isPaused()) {
-          response.data.pause();
-          res.once('drain', () => response.data.resume());
-        }
+        if (clientBusy && !response.data.isPaused()) response.data.pause();
       });
       response.data.on('end', () => finish('ended early'));
       response.data.on('error', (error) => finish(error.message));
     };
+
+    // The player took what was sent: read on, or pick the transfer back up
+    res.on('drain', () => {
+      clientBusy = false;
+
+      if (pendingResume !== null) {
+        pendingResume = null;
+        return resume('player idle', true);
+      }
+
+      if (current && current.data.isPaused()) current.data.resume();
+    });
 
     // The player closing the connection (seek, pause, close) is normal
     req.on('close', () => {
