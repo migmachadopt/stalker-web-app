@@ -139,6 +139,9 @@ jobs:
       - name: 📤 Deploy frontend
         run: |
           sudo rsync -av --delete ./frontend/ ${{ env.APP_DIR }}/frontend/
+          # Stamp asset URLs with the commit so browsers and the CDN never serve
+          # a stale stylesheet or script next to a new page
+          sudo sed -i "s/__BUILD__/${GITHUB_SHA::8}/g" ${{ env.APP_DIR }}/frontend/*.html
           echo "✅ Frontend synchronized (including new JS modules)"
 
       - name: 📦 Install dependencies
