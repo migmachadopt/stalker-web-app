@@ -59,6 +59,7 @@
       info: <React.Fragment><circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" /></React.Fragment>,
       refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>,
       rewind: <React.Fragment><polygon points="11 19 2 12 11 5 11 19" /><polygon points="22 19 13 12 22 5 22 19" /></React.Fragment>,
+      cc: <React.Fragment><rect x="2" y="5" width="20" height="14" rx="3" /><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M17 10.2a2.2 2.2 0 1 0 0 3.6" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>
     };
 
@@ -89,7 +90,9 @@
     //             (recordings); otherwise the video element's own timeline is used
     //   children  extra buttons shown after the play button
 
-    function PlayerControls({ videoRef, title, subtitle, meta, live, seek, onClose, children }) {
+    //   captions  { on, onToggle } when the title has subtitles to show
+
+    function PlayerControls({ videoRef, title, subtitle, meta, live, seek, captions, onClose, children }) {
       const [playing, setPlaying] = useState(false);
       const [time, setTime] = useState(0);
       const [duration, setDuration] = useState(0);
@@ -212,6 +215,7 @@
           if (e.key === ' ' || e.key === 'k') { e.preventDefault(); togglePlay(); }
           else if (e.key === 'f') toggleFullscreen();
           else if (e.key === 'm') toggleMute();
+          else if (e.key === 'c' && captions) captions.onToggle();
           else if (!live && e.key === 'ArrowLeft') seekTo(position - 10);
           else if (!live && e.key === 'ArrowRight') seekTo(position + 10);
         };
@@ -271,6 +275,15 @@
 
               <div className="pc-spacer"></div>
 
+              {captions && (
+                <button
+                  className={`pc-icon ${captions.on ? 'on' : ''}`}
+                  title={captions.on ? 'Hide subtitles (c)' : 'Show subtitles (c)'}
+                  onClick={captions.onToggle}
+                >
+                  <Icon name="cc" size={22} />
+                </button>
+              )}
               <button className="pc-icon" title="Mute (m)" onClick={toggleMute}>
                 <Icon name={level === 0 ? 'mute' : 'volume'} size={22} />
               </button>
@@ -377,6 +390,11 @@
       const [playerError, setPlayerError] = useState('');
       const [heroIndex, setHeroIndex] = useState(0);
       const [continueList, setContinueList] = useState(() => readContinue().filter(e => e.type === type));
+      const [hasCaptions, setHasCaptions] = useState(false);
+      const [captionsOn, setCaptionsOn] = useState(() => {
+        try { return localStorage.getItem('vod:captions') !== 'off'; } catch (_) { return true; }
+      });
+      const textTrackRef = useRef(null);
       const videoRef = useRef(null);
       const gridRequest = useRef(0);
       const lastSaved = useRef(0);
@@ -601,6 +619,69 @@
         writeContinue(finished || position < 30
           ? others
           : [{ ...playing.entry, key: playing.key, position, duration, updatedAt: Date.now() }, ...others]);
+      };
+
+      // Subtitles embedded in the file are found by the server as the film is
+      // read; ask for the new lines every few seconds and hand them to the video
+      useEffect(() => {
+        setHasCaptions(false);
+        textTrackRef.current = null;
+        if (!playing) return;
+
+        const video = videoRef.current;
+        if (!video) return;
+
+        let cancelled = false;
+        let timer = null;
+        let received = 0;
+
+        const poll = async () => {
+          let again = 3000;
+
+          try {
+            const response = await fetch(`${BACKEND_ORIGIN}${playing.streamUrl}/cues?after=${received}`);
+            const data = await response.json();
+            if (cancelled) return;
+
+            if (!data.success || data.status === 'none') return;
+
+            if (data.status === 'ready') {
+              if (!textTrackRef.current) {
+                textTrackRef.current = video.addTextTrack('subtitles', 'Subtitles', data.language === 'por' ? 'pt' : (data.language || 'und'));
+                textTrackRef.current.mode = captionsOn ? 'showing' : 'hidden';
+                setHasCaptions(true);
+              }
+
+              data.cues.forEach(line => {
+                const cue = new VTTCue(line.start, line.end, line.text);
+                // Bottom edge at 84% of the picture: clear of the control bar
+                cue.snapToLines = false;
+                cue.line = 84;
+                cue.lineAlign = 'end';
+                textTrackRef.current.addCue(cue);
+              });
+              received += data.cues.length;
+
+              if (data.complete && data.cues.length === 0) return;
+            } else {
+              again = 1500; // still looking for the track
+            }
+          } catch (err) {
+            if (cancelled) return;
+          }
+
+          timer = setTimeout(poll, again);
+        };
+
+        poll();
+        return () => { cancelled = true; clearTimeout(timer); };
+      }, [playing && playing.streamUrl]);
+
+      const toggleCaptions = () => {
+        const next = !captionsOn;
+        setCaptionsOn(next);
+        if (textTrackRef.current) textTrackRef.current.mode = next ? 'showing' : 'hidden';
+        try { localStorage.setItem('vod:captions', next ? 'on' : 'off'); } catch (_) {}
       };
 
       const forgetContinue = (entry) => {
@@ -862,6 +943,7 @@
                 videoRef={videoRef}
                 title={playing.title}
                 subtitle={playing.subtitle}
+                captions={hasCaptions ? { on: captionsOn, onToggle: toggleCaptions } : null}
                 onClose={closePlayer}
               >
                 {playing.next && (
@@ -1247,6 +1329,9 @@
       const [playerNotice, setPlayerNotice] = useState('');
       const liveRetryRef = useRef({ count: 0, timer: null, startedAt: 0 });
       const liveBufferTimer = useRef(null);
+      
+      // Programme on air for the channel being watched live: { current, next }
+      const [onAir, setOnAir] = useState(null);
       
       // Modals
       const [showChangePassword, setShowChangePassword] = useState(false);
@@ -1932,6 +2017,42 @@
         loadArchiveStream(archivePlayback.streamUrl, target);
       };
 
+      // Show what is on air under the channel name, and follow programme changes
+      const liveChannelId = currentChannel && !archivePlayback ? currentChannel.id : null;
+      
+      useEffect(() => {
+        setOnAir(null);
+        if (liveChannelId === null) return;
+        
+        let cancelled = false;
+        let timer = null;
+        
+        const load = async () => {
+          let wait = 5 * 60 * 1000;
+          
+          try {
+            const data = await api.iptvGetNow(liveChannelId);
+            if (cancelled) return;
+            
+            const now = Date.now() / 1000;
+            const programs = data.success ? data.programs : [];
+            const current = programs.find(p => p.start <= now && p.stop > now) || null;
+            const next = programs.find(p => p.start > now) || null;
+            setOnAir(current || next ? { current, next } : null);
+            
+            // Look again shortly after the current programme ends
+            if (current) wait = Math.min(Math.max((current.stop - now) * 1000 + 5000, 30000), wait);
+          } catch (err) {
+            if (cancelled) return;
+          }
+          
+          timer = setTimeout(load, wait);
+        };
+        
+        load();
+        return () => { cancelled = true; clearTimeout(timer); };
+      }, [liveChannelId]);
+
       // The provider allows one stream per account: leaving live TV stops it
       const switchSection = (next) => {
         if (next === section) return;
@@ -2268,7 +2389,17 @@
                     videoRef={videoRef}
                     live={!archivePlayback}
                     title={archivePlayback ? archivePlayback.title : currentChannel.name}
-                    subtitle={archivePlayback ? `${currentChannel.name} • Recording` : `Channel ${currentChannel.number}`}
+                    subtitle={archivePlayback
+                      ? `${currentChannel.name} • Recording`
+                      : onAir?.current
+                        ? `${onAir.current.name} • ${clockTime(onAir.current.start)} – ${clockTime(onAir.current.stop)}`
+                        : `Channel ${currentChannel.number}`}
+                    meta={!archivePlayback && onAir
+                      ? [
+                          onAir.current ? `Channel ${currentChannel.number}` : '',
+                          onAir.next ? `Next: ${onAir.next.name} at ${clockTime(onAir.next.start)}` : ''
+                        ].filter(Boolean).join('  •  ')
+                      : null}
                     seek={archivePlayback ? { position: archivePos, duration: archivePlayback.duration, onSeek: seekArchive } : null}
                   >
                     {archivePlayback ? (

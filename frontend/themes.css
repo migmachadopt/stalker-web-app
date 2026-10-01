@@ -3597,3 +3597,17 @@ button .icon,
 .group-item .count {
   font-family: var(--font);
 }
+
+/* Subtitles */
+.pc-icon.on {
+  background: #fff;
+  color: #000;
+}
+
+video::cue {
+  font-family: var(--font);
+  font-size: 3vh;
+  line-height: 1.35;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+}

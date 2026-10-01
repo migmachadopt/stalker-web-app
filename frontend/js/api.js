@@ -102,6 +102,11 @@ const api = {
     return this.iptvCall('/iptv/epg', { channelId, date });
   },
   
+  // Programme on air (first) and the next ones
+  async iptvGetNow(channelId) {
+    return this.iptvCall('/iptv/epg/now', { channelId });
+  },
+  
   // window: { date, programId, start?, duration?, title }
   async iptvGetArchiveStream(channelId, window) {
     return this.iptvCall('/iptv/archive/stream', { channelId, ...window });

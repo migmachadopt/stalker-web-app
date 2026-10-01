@@ -569,6 +569,25 @@ class IPTVService {
       .sort((a, b) => a.start - b.start);
   }
 
+  // What is on a channel right now and the programmes that follow (one request)
+  async getShortEpg(sessionId, channelId) {
+    const js = await this.portalGet(
+      sessionId,
+      `type=itv&action=get_short_epg&ch_id=${encodeURIComponent(channelId)}&size=4`,
+      v => v !== undefined && v !== null
+    );
+
+    return (Array.isArray(js) ? js : [])
+      .map(item => ({
+        name: item.name || '',
+        descr: item.descr || '',
+        start: Number(item.start_timestamp),
+        stop: Number(item.stop_timestamp)
+      }))
+      .filter(item => item.name && item.start && item.stop > item.start)
+      .sort((a, b) => a.start - b.start);
+  }
+
   // Provider link for an archived programme (EPG item id)
   async createArchiveLink(sessionId, programId) {
     const session = this.getSession(sessionId);

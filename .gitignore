@@ -141,3 +141,6 @@ backend/data/users.enc
 
 # Cached channel lists
 backend/data/channels-*.enc
+
+# Stored subtitles
+backend/data/subtitles/

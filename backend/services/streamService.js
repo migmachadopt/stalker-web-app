@@ -6,6 +6,7 @@ const axios = require('axios');
 const config = require('../config/constants');
 const encryption = require('./encryption');
 const logger = require('../utils/logger');
+const subtitleService = require('./subtitleService');
 
 const TS_PACKET_SIZE = 188;
 
@@ -90,6 +91,8 @@ class StreamService {
           channel: token.channelInfo.name
         });
       }
+      // Keep the subtitle lines gathered during this stretch of playback
+      if (token.archive?.subtitles?.dirty) subtitleService.save(token.archive.subtitles);
       upstreamResponse.data.destroy();
     });
   }
@@ -271,7 +274,34 @@ class StreamService {
       );
     }
 
+    // Embedded subtitles are picked out of the bytes on their way to the player
+    if (archive.subtitles?.status === 'ready') {
+      let position = base + from;
+      upstreamResponse.data.on('data', (chunk) => {
+        subtitleService.collect(archive.subtitles, position, chunk);
+        position += chunk.length;
+      });
+    }
+
     this.pipeToClient(upstreamResponse, req, res, token);
+  }
+
+  // Subtitle lines gathered so far for a file token, from line number `after`
+  getCues(tokenId, after = 0) {
+    const token = this.streamTokens.get(tokenId);
+
+    if (!token || Date.now() > token.expiresAt || !token.archive) return null;
+
+    const subtitles = token.archive.subtitles || { status: 'none', cues: [] };
+    const from = Math.max(0, parseInt(after, 10) || 0);
+
+    return {
+      status: subtitles.status,
+      language: subtitles.language || null,
+      total: subtitles.cues.length,
+      complete: !!subtitles.complete,
+      cues: subtitles.cues.slice(from)
+    };
   }
 
   cleanupTokens() {

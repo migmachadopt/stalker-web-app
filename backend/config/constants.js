@@ -28,6 +28,7 @@ module.exports = {
   // TV archive (catch-up)
   EPG_CACHE_TTL: 5 * 60 * 1000, // 5 minutes
   EPG_PAST_CACHE_TTL: 60 * 60 * 1000, // 1 hour, for days that are over
+  EPG_NOW_CACHE_TTL: 60 * 1000, // 1 minute, for the programme on air
   GUIDE_REQUEST_SPACING: 200, // ms between programme guide requests to the portal
   ARCHIVE_TOKEN_EXPIRY: 12 * 60 * 60 * 1000, // 12 hours
   ARCHIVE_MAX_WINDOW: 12 * 60 * 60, // 12 hours, in seconds

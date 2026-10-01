@@ -13,6 +13,7 @@ const streamService = require('./services/streamService');
 const channelListService = require('./services/channelListService');
 const archiveService = require('./services/archiveService');
 const vodService = require('./services/vodService');
+const subtitleService = require('./services/subtitleService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -523,6 +524,38 @@ app.post('/api/iptv/epg', authMiddleware, async (req, res) => {
   }
 });
 
+// Programme on air and the ones that follow, for the live player
+app.post('/api/iptv/epg/now', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, channelId } = req.body;
+    
+    const session = iptvService.getSession(sessionId);
+    
+    if (!session) {
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
+    }
+    
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
+    }
+    
+    const user = userService.findUserById(req.user.userId);
+    const channel = user && channelListService.findVisibleChannel(user, channelId);
+    
+    if (!channel) {
+      return res.status(403).json({ success: false, error: 'Channel not available' });
+    }
+    
+    const programs = await archiveService.getNow(sessionId, channel.id);
+    
+    res.json({ success: true, channelId: channel.id, programs });
+    
+  } catch (error) {
+    logger.error('iptv', 'Now playing fetch error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to fetch current programme' });
+  }
+});
+
 // Archive (catch-up) stream for a programme or a custom interval of a channel
 app.post('/api/iptv/archive/stream', authMiddleware, async (req, res) => {
   try {
@@ -684,17 +717,31 @@ app.post('/api/iptv/vod/stream', authMiddleware, async (req, res) => {
     const { extension, contentType } = vodService.describeLink(link);
     const safeTitle = String(title || 'video').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'video';
     
+    const file = {
+      contentType,
+      filename: `${safeTitle}.${extension}`,
+      relink: () => iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber),
+      subtitles: { status: 'loading', cues: [] }
+    };
+    
     const streamToken = streamService.generateStreamToken(
       req.user.userId,
       link,
       { id: cmd.slice(0, 24), name: safeTitle, type: 'VOD' },
       ctx.session.username,
-      {
-        contentType,
-        filename: `${safeTitle}.${extension}`,
-        relink: () => iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber)
-      }
+      file
     );
+    
+    // Find the embedded subtitle track in the background; playback does not wait for it
+    if (extension === 'mp4' || extension === 'm4v') {
+      const subtitleKey = require('crypto')
+        .createHash('sha1')
+        .update([iptvService.getPortalKey(ctx.sessionId), ctx.type, cmd, episodeNumber].join('|'))
+        .digest('hex');
+      subtitleService.prepare(link, subtitleKey).then(subtitles => { file.subtitles = subtitles; });
+    } else {
+      file.subtitles = { status: 'none', cues: [] };
+    }
     
     logger.logUserActivity(ctx.session.username, `requesting ${ctx.type}`, { title: safeTitle });
     
@@ -758,6 +805,18 @@ app.post('/api/iptv/disconnect', authMiddleware, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🎬 STREAM PROXY
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// Embedded subtitle lines found so far while the film plays
+app.get('/api/stream/:tokenId/cues', (req, res) => {
+  const result = streamService.getCues(req.params.tokenId, req.query.after);
+  
+  if (!result) {
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
+  }
+  
+  res.set('Cache-Control', 'no-store');
+  res.json({ success: true, ...result });
+});
 
 app.get('/api/stream/:tokenId', async (req, res) => {
   await streamService.handleStream(req.params.tokenId, req, res);

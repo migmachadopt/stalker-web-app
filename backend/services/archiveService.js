@@ -42,6 +42,21 @@ class ArchiveService {
     return programs;
   }
 
+  // Current and next programmes of a channel, for the live player
+  async getNow(sessionId, channelId) {
+    const key = `${iptvService.getPortalKey(sessionId)}:${channelId}:now`;
+    const cached = this.epgCache.get(key);
+
+    if (cached && Date.now() - cached.at < config.EPG_NOW_CACHE_TTL) {
+      return cached.programs;
+    }
+
+    const programs = await iptvService.getShortEpg(sessionId, channelId);
+    this.epgCache.set(key, { at: Date.now(), programs });
+
+    return programs;
+  }
+
   // Link for a time window of an archived channel. The portal only issues links
   // for whole programmes, so one programme of that day is used as the seed and
   // its link is re-pointed at the requested start/duration.
