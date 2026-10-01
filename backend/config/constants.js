@@ -32,6 +32,7 @@ module.exports = {
   GUIDE_REQUEST_SPACING: 200, // ms between programme guide requests to the portal
   ARCHIVE_TOKEN_EXPIRY: 12 * 60 * 60 * 1000, // 12 hours
   ARCHIVE_MAX_WINDOW: 12 * 60 * 60, // 12 hours, in seconds
+  FILE_HOLD_BYTES: 1536 * 1024, // newest bytes held back to strip the provider's closing clip
 
   // Video club & series catalogue
   VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes

@@ -3,61 +3,183 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 //
 // Films carry their subtitles as a text track inside the MP4, which browsers do
-// not display. The track's samples are a few bytes each, scattered through the
-// whole file, so fetching them separately would mean thousands of requests.
-// Instead the file index (moov) is read once to learn where every subtitle
-// sample lives, and the samples are picked out of the bytes that already flow
-// through the stream proxy while the film plays. What was found is stored per
-// title, so the next playback has the lines without reading them again.
+// not display. The provider allows a single connection per account, so nothing
+// here opens one: both the file index (moov), which says where every subtitle
+// sample lives, and the samples themselves are picked out of the bytes that
+// already flow through the stream proxy while the film plays. What was found is
+// stored per title, so the next playback has it without reading it again.
 
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
 const config = require('../config/constants');
 const logger = require('../utils/logger');
 
 const MAX_INDEX_BYTES = 64 * 1024 * 1024;
+const MAX_TOP_BOXES = 16;
 const STORE_DIR = path.join(config.DATA_DIR, 'subtitles');
 const SAVE_INTERVAL = 20000;
 
 class SubtitleService {
-  async readRange(url, from, to) {
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      timeout: 30000,
-      headers: {
-        'User-Agent': config.STALKER_HEADERS['User-Agent'],
-        Range: `bytes=${from}-${to}`
-      },
-      validateStatus: (status) => status === 206 || status === 200
-    });
+  // ── Storage ──────────────────────────────────────────────────────────────
 
-    return Buffer.from(response.data);
+  storePath(key) {
+    return path.join(STORE_DIR, `${key}.json`);
   }
 
-  // Walk the top-level boxes until the index (moov) is found, and download it
-  async readIndex(url) {
-    let offset = 0;
+  load(key) {
+    try {
+      return JSON.parse(fs.readFileSync(this.storePath(key), 'utf8'));
+    } catch (_) {
+      return null;
+    }
+  }
 
-    for (let i = 0; i < 12; i++) {
-      const header = await this.readRange(url, offset, offset + 15);
-      if (header.length < 8) return null;
+  save(subtitles) {
+    if (!subtitles.key || !subtitles.dirty) return;
 
-      let size = header.readUInt32BE(0);
-      const type = header.toString('latin1', 4, 8);
+    try {
+      fs.mkdirSync(STORE_DIR, { recursive: true });
+      fs.writeFileSync(this.storePath(subtitles.key), JSON.stringify({
+        status: subtitles.status,
+        language: subtitles.language,
+        complete: !!subtitles.complete,
+        // [offset, size, start, end] of every line, so the index is not needed again
+        samples: subtitles.samples.map(s => [s.offset, s.size, s.start, s.end]),
+        cues: subtitles.cues
+      }));
+      subtitles.dirty = false;
+      subtitles.savedAt = Date.now();
+    } catch (error) {
+      logger.warn('stream', 'Subtitles could not be stored', { error: error.message });
+    }
+  }
 
-      if (size === 1 && header.length >= 16) size = Number(header.readBigUInt64BE(8));
-      if (size < 8) return null;
+  // Subtitle state for a title: { status, language, samples, cues, key, complete }
+  //   loading  the file index has not passed through the proxy yet
+  //   ready    the track is known; lines are collected as the film is read
+  //   none     the file has no text track
+  open(key) {
+    const stored = key ? this.load(key) : null;
 
-      if (type === 'moov') {
-        if (size > MAX_INDEX_BYTES) return null;
-        return this.readRange(url, offset, offset + size - 1);
-      }
-
-      offset += size;
+    if (stored?.status === 'none') {
+      return { status: 'none', samples: [], cues: [], key };
     }
 
-    return null;
+    if (stored?.status === 'ready' && Array.isArray(stored.samples)) {
+      const samples = stored.samples.map(([offset, size, start, end], i) => ({ offset, size, start, end, i }));
+      stored.cues.forEach(cue => { if (samples[cue.i]) samples[cue.i].done = true; });
+
+      // Lines that turned out empty leave no cue; when the track was complete, all are done
+      if (stored.complete) samples.forEach(s => { s.done = true; });
+
+      return {
+        status: 'ready',
+        language: stored.language,
+        samples,
+        cues: stored.cues,
+        key,
+        complete: !!stored.complete,
+        collected: samples.filter(s => s.done).length
+      };
+    }
+
+    return { status: 'loading', samples: [], cues: [], key, scan: { next: 0, boxes: 0, header: null, moov: null } };
+  }
+
+  // ── MP4 index ────────────────────────────────────────────────────────────
+
+  // Copy the part of `chunk` (file offset `position`) that belongs to `target`
+  // ({ offset, size, data, got }); true once the target is whole. Pieces only
+  // count in order, so repeats and gaps are ignored.
+  fill(target, position, chunk) {
+    const from = Math.max(position, target.offset);
+    const to = Math.min(position + chunk.length, target.offset + target.size);
+
+    if (to <= from || from - target.offset > target.got) return target.got >= target.size;
+
+    chunk.copy(target.data, from - target.offset, from - position, to - position);
+    target.got = Math.max(target.got, to - target.offset);
+
+    return target.got >= target.size;
+  }
+
+  // Follow the top-level boxes of the file as its bytes go by, until the index
+  // (moov) has been seen whole; then work out the subtitle track from it.
+  feedIndex(subtitles, position, chunk) {
+    const scan = subtitles.scan;
+    const end = position + chunk.length;
+
+    while (subtitles.status === 'loading') {
+      if (scan.moov) {
+        if (!this.fill(scan.moov, position, chunk)) return;
+
+        this.useIndex(subtitles, scan.moov.data);
+        subtitles.scan = null;
+        return;
+      }
+
+      if (!scan.header) {
+        scan.header = { offset: scan.next, size: 16, data: Buffer.alloc(16), got: 0 };
+      }
+
+      // The next box header is not in this piece of the file
+      if (scan.header.offset >= end || scan.header.offset + scan.header.got < position) return;
+      if (!this.fill(scan.header, position, chunk)) return;
+
+      const header = scan.header.data;
+      let size = header.readUInt32BE(0);
+      const type = header.toString('latin1', 4, 8);
+      if (size === 1) size = Number(header.readBigUInt64BE(8));
+
+      scan.header = null;
+
+      if (size < 8 || ++scan.boxes > MAX_TOP_BOXES || !/^[\x20-\x7e]{4}$/.test(type)) {
+        return this.setNone(subtitles);
+      }
+
+      if (type === 'moov') {
+        if (size > MAX_INDEX_BYTES) return this.setNone(subtitles);
+        scan.moov = { offset: scan.next, size, data: Buffer.alloc(size), got: 0 };
+      } else {
+        scan.next += size;
+      }
+    }
+  }
+
+  setNone(subtitles) {
+    subtitles.status = 'none';
+    subtitles.scan = null;
+    subtitles.dirty = true;
+    this.save(subtitles);
+  }
+
+  useIndex(subtitles, index) {
+    try {
+      const moov = this.children(index).moov?.[0];
+      const tracks = (moov ? this.children(moov).trak || [] : [])
+        .map(trak => this.parseTextTrack(trak))
+        .filter(track => track && track.samples.length);
+
+      if (!tracks.length) return this.setNone(subtitles);
+
+      // Portuguese first (the one flagged as default if there are several)
+      const track = tracks.find(t => t.language === 'por' && t.enabled)
+        || tracks.find(t => t.language === 'por')
+        || tracks.find(t => t.enabled)
+        || tracks[0];
+
+      subtitles.status = 'ready';
+      subtitles.language = track.language;
+      subtitles.samples = track.samples;
+      subtitles.collected = 0;
+      subtitles.dirty = true;
+      this.save(subtitles);
+
+      logger.info('stream', 'Subtitle track found', { language: track.language, lines: track.samples.length });
+    } catch (error) {
+      logger.warn('stream', 'Subtitle index not readable', { error: error.message });
+      this.setNone(subtitles);
+    }
   }
 
   // Child boxes of a container as { type: [payload, ...] }
@@ -166,92 +288,7 @@ class SubtitleService {
     return { language, enabled, samples };
   }
 
-  storePath(key) {
-    return path.join(STORE_DIR, `${key}.json`);
-  }
-
-  // Lines stored from earlier playbacks of this title
-  load(key) {
-    try {
-      return JSON.parse(fs.readFileSync(this.storePath(key), 'utf8'));
-    } catch (_) {
-      return null;
-    }
-  }
-
-  save(subtitles) {
-    if (!subtitles.key || !subtitles.dirty) return;
-
-    try {
-      fs.mkdirSync(STORE_DIR, { recursive: true });
-      fs.writeFileSync(this.storePath(subtitles.key), JSON.stringify({
-        language: subtitles.language,
-        complete: !!subtitles.complete,
-        cues: subtitles.cues
-      }));
-      subtitles.dirty = false;
-      subtitles.savedAt = Date.now();
-    } catch (error) {
-      logger.warn('stream', 'Subtitles could not be stored', { error: error.message });
-    }
-  }
-
-  // Subtitle state for a file: { status, language, samples, cues, key, complete }
-  // `key` identifies the title, so lines found once are kept for next time.
-  async prepare(url, key) {
-    const stored = key ? this.load(key) : null;
-
-    // Everything was collected before: nothing to read from the file
-    if (stored?.complete) {
-      return { status: 'ready', language: stored.language, samples: [], cues: stored.cues, key, complete: true };
-    }
-
-    try {
-      let index;
-      try {
-        index = await this.readIndex(url);
-      } catch (error) {
-        // The provider sometimes refuses a request made right after another one
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        index = await this.readIndex(url);
-      }
-      if (!index) return { status: 'none', cues: [] };
-
-      const moov = this.children(index).moov?.[0];
-      if (!moov) return { status: 'none', cues: [] };
-
-      const tracks = (this.children(moov).trak || [])
-        .map(trak => this.parseTextTrack(trak))
-        .filter(track => track && track.samples.length);
-
-      if (!tracks.length) return { status: 'none', cues: [] };
-
-      // Portuguese first (the one flagged as default if there are several)
-      const track = tracks.find(t => t.language === 'por' && t.enabled)
-        || tracks.find(t => t.language === 'por')
-        || tracks.find(t => t.enabled)
-        || tracks[0];
-
-      const cues = [];
-      if (stored && stored.language === track.language) {
-        stored.cues.forEach(cue => {
-          const sample = track.samples[cue.i];
-          if (sample && !sample.done) { sample.done = true; cues.push(cue); }
-        });
-      }
-
-      logger.info('stream', 'Subtitle track found', {
-        language: track.language,
-        lines: track.samples.length,
-        stored: cues.length
-      });
-
-      return { status: 'ready', language: track.language, samples: track.samples, cues, key, complete: false };
-    } catch (error) {
-      logger.warn('stream', 'Subtitle index not readable', { error: error.message });
-      return { status: 'none', cues: [] };
-    }
-  }
+  // ── Lines ────────────────────────────────────────────────────────────────
 
   // tx3g sample: 16-bit text length, the text, then optional style boxes
   decode(sample, data) {
@@ -260,7 +297,12 @@ class SubtitleService {
     return text ? { i: sample.i, start: sample.start, end: sample.end, text } : null;
   }
 
-  // Called with every piece of the file the proxy forwards
+  // Called with every piece of the file the proxy forwards to the player
+  feed(subtitles, position, chunk) {
+    if (subtitles.status === 'loading') this.feedIndex(subtitles, position, chunk);
+    if (subtitles.status === 'ready' && !subtitles.complete) this.collect(subtitles, position, chunk);
+  }
+
   collect(subtitles, position, chunk) {
     const samples = subtitles.samples;
     const end = position + chunk.length;
@@ -282,22 +324,13 @@ class SubtitleService {
         sample.got = 0;
       }
 
-      const from = Math.max(position, sample.offset);
-      const to = Math.min(end, sample.offset + sample.size);
-
-      // Pieces are only useful in order; anything else is a repeat or a gap
-      if (from - sample.offset > sample.got) continue;
-
-      chunk.copy(sample.data, from - sample.offset, from - position, to - position);
-      sample.got = Math.max(sample.got, to - sample.offset);
-
-      if (sample.got >= sample.size) {
+      if (this.fill(sample, position, chunk)) {
         const cue = this.decode(sample, sample.data);
         if (cue) subtitles.cues.push(cue);
         sample.done = true;
         sample.data = null;
+        subtitles.collected = (subtitles.collected || 0) + 1;
         subtitles.dirty = true;
-        subtitles.collected = (subtitles.collected || samples.filter(x => x.done).length - 1) + 1;
       }
     }
 

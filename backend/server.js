@@ -717,31 +717,27 @@ app.post('/api/iptv/vod/stream', authMiddleware, async (req, res) => {
     const { extension, contentType } = vodService.describeLink(link);
     const safeTitle = String(title || 'video').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150) || 'video';
     
-    const file = {
-      contentType,
-      filename: `${safeTitle}.${extension}`,
-      relink: () => iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber),
-      subtitles: { status: 'loading', cues: [] }
-    };
+    // Embedded subtitles are read from the film's own bytes as they are proxied,
+    // and remembered per title
+    const subtitleKey = require('crypto')
+      .createHash('sha1')
+      .update([iptvService.getPortalKey(ctx.sessionId), ctx.type, cmd, episodeNumber].join('|'))
+      .digest('hex');
     
     const streamToken = streamService.generateStreamToken(
       req.user.userId,
       link,
       { id: cmd.slice(0, 24), name: safeTitle, type: 'VOD' },
       ctx.session.username,
-      file
+      {
+        contentType,
+        filename: `${safeTitle}.${extension}`,
+        relink: () => iptvService.createVodLink(ctx.sessionId, cmd, episodeNumber),
+        subtitles: extension === 'mp4' || extension === 'm4v'
+          ? subtitleService.open(subtitleKey)
+          : { status: 'none', samples: [], cues: [] }
+      }
     );
-    
-    // Find the embedded subtitle track in the background; playback does not wait for it
-    if (extension === 'mp4' || extension === 'm4v') {
-      const subtitleKey = require('crypto')
-        .createHash('sha1')
-        .update([iptvService.getPortalKey(ctx.sessionId), ctx.type, cmd, episodeNumber].join('|'))
-        .digest('hex');
-      subtitleService.prepare(link, subtitleKey).then(subtitles => { file.subtitles = subtitles; });
-    } else {
-      file.subtitles = { status: 'none', cues: [] };
-    }
     
     logger.logUserActivity(ctx.session.username, `requesting ${ctx.type}`, { title: safeTitle });
     

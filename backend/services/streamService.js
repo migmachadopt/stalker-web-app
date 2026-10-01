@@ -9,6 +9,8 @@ const logger = require('../utils/logger');
 const subtitleService = require('./subtitleService');
 
 const TS_PACKET_SIZE = 188;
+const PROVIDER_NOTICE_MARK = Buffer.from('FFmpeg\tService01', 'latin1');
+const PROVIDER_NOTICE_HEAD = Buffer.from([0x47, 0x40, 0x11]);
 
 class StreamService {
   constructor() {
@@ -238,21 +240,7 @@ class StreamService {
       });
     }
 
-    const range = `bytes=${base + from}-${base + to}`;
-    let upstreamResponse = await this.fetchUpstream(streamUrl, range);
-
-    if (upstreamResponse.status >= 400) {
-      upstreamResponse.data.destroy();
-      streamUrl = await this.relinkArchive(token);
-      upstreamResponse = await this.fetchUpstream(streamUrl, range);
-
-      if (upstreamResponse.status >= 400) {
-        upstreamResponse.data.destroy();
-        throw new Error(`File upstream responded ${upstreamResponse.status}`);
-      }
-
-      archive.totalBytes = total;
-    }
+    const upstreamResponse = await this.openFile(token, base + from, base + to);
 
     res.status(rangeMatch ? 206 : 200);
     res.set('Content-Type', archive.contentType || 'video/mp2t');
@@ -274,16 +262,160 @@ class StreamService {
       );
     }
 
-    // Embedded subtitles are picked out of the bytes on their way to the player
-    if (archive.subtitles?.status === 'ready') {
-      let position = base + from;
-      upstreamResponse.data.on('data', (chunk) => {
-        subtitleService.collect(archive.subtitles, position, chunk);
-        position += chunk.length;
-      });
+    this.pipeFile(token, req, res, upstreamResponse, base + from, base + to);
+  }
+
+  // Open a byte range of the provider file. The provider now and then refuses a
+  // request made right after another one, and links expire: wait and ask again,
+  // then get a fresh link from the portal before giving up.
+  async openFile(token, first, last) {
+    const range = `bytes=${first}-${last}`;
+    let status = 0;
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      let url = encryption.decryptStreamUrl(token.encryptedUrl, token.iv);
+
+      if (attempt === 3) {
+        const size = token.archive.totalBytes;
+        url = await this.relinkArchive(token);
+        token.archive.totalBytes = size;
+      } else if (attempt === 2) {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+      }
+
+      const response = await this.fetchUpstream(url, range);
+      const contentRange = response.headers['content-range'] || '';
+
+      // Only accept exactly the bytes asked for: anything else would corrupt the file
+      if (response.status === 206 && contentRange.startsWith(`bytes ${first}-`)) return response;
+
+      status = response.status;
+      response.data.destroy();
+      logger.warn('stream', 'File request refused by the provider', { status, attempt, contentRange });
     }
 
-    this.pipeToClient(upstreamResponse, req, res, token);
+    throw new Error(`File upstream responded ${status}`);
+  }
+
+  // When the provider closes a connection because the account opened another
+  // one, it first injects a short "Connection Closed" MPEG-TS clip in place of
+  // the file's bytes. Returns where that clip starts in `buffer`, or -1.
+  findProviderNotice(buffer) {
+    const mark = buffer.indexOf(PROVIDER_NOTICE_MARK);
+    if (mark < 0) return -1;
+
+    // The mark sits in the clip's first packet (an SDT packet: 47 40 11 ...),
+    // so the clip starts at the packet header just before it
+    const start = buffer.lastIndexOf(PROVIDER_NOTICE_HEAD, mark);
+    return start >= 0 && mark - start < TS_PACKET_SIZE ? start : Math.max(0, mark - 25);
+  }
+
+  // Send a byte range to the client. The newest bytes are held back for a
+  // moment: if the provider cuts the connection, its closing clip is removed
+  // from them and the transfer carries on from the last good byte, so the
+  // player never receives foreign data and never notices the interruption.
+  pipeFile(token, req, res, firstResponse, first, last) {
+    let received = first;   // next file byte expected from the provider
+    let sent = first;       // next file byte to hand to the client
+    let held = [];
+    let heldBytes = 0;
+    let current = null;
+    let clientClosed = false;
+    let resumes = 0;
+
+    const forward = (chunk) => {
+      // Embedded subtitles are picked out of the bytes on their way to the player
+      if (token.archive.subtitles) subtitleService.feed(token.archive.subtitles, sent, chunk);
+      sent += chunk.length;
+      return res.write(chunk);
+    };
+
+    // Forward held chunks while at least `keep` bytes stay behind
+    const release = (keep) => {
+      let flowing = true;
+      while (held.length && heldBytes - held[0].length >= keep) {
+        const chunk = held.shift();
+        heldBytes -= chunk.length;
+        flowing = forward(chunk) && flowing;
+      }
+      return flowing;
+    };
+
+    const resume = async (reason) => {
+      if (clientClosed) return;
+
+      if (++resumes > 5) {
+        logger.error('stream', 'File stream lost', { channel: token.channelInfo.name, reason });
+        return res.destroy();
+      }
+
+      logger.warn('stream', 'File stream interrupted, resuming', {
+        channel: token.channelInfo.name,
+        reason,
+        at: received
+      });
+
+      try {
+        const next = await this.openFile(token, received, last);
+        if (clientClosed) return next.data.destroy();
+        attach(next);
+      } catch (error) {
+        logger.error('stream', 'File stream could not be resumed', { error: error.message });
+        res.destroy();
+      }
+    };
+
+    const attach = (response) => {
+      current = response;
+      let finished = false;
+
+      const finish = (reason) => {
+        if (finished || clientClosed) return;
+        finished = true;
+
+        if (received > last) {
+          release(0);
+          return res.end();
+        }
+
+        // Cut short: keep only the bytes that really belong to the file
+        const tail = Buffer.concat(held);
+        held = [];
+        heldBytes = 0;
+
+        const notice = this.findProviderNotice(tail);
+        const valid = notice >= 0 ? tail.subarray(0, notice) : tail;
+
+        received -= tail.length - valid.length;
+        if (valid.length) forward(valid);
+
+        resume(notice >= 0 ? 'provider closed the connection (account in use elsewhere)' : reason);
+      };
+
+      response.data.on('data', (chunk) => {
+        held.push(chunk);
+        heldBytes += chunk.length;
+        received += chunk.length;
+        resumes = 0;
+
+        // Respect a slow client: stop reading until it has taken what was sent
+        if (!release(config.FILE_HOLD_BYTES) && !response.data.isPaused()) {
+          response.data.pause();
+          res.once('drain', () => response.data.resume());
+        }
+      });
+      response.data.on('end', () => finish('ended early'));
+      response.data.on('error', (error) => finish(error.message));
+    };
+
+    // The player closing the connection (seek, pause, close) is normal
+    req.on('close', () => {
+      clientClosed = true;
+      if (token.archive.subtitles?.dirty) subtitleService.save(token.archive.subtitles);
+      if (current) current.data.destroy();
+    });
+
+    attach(firstResponse);
   }
 
   // Subtitle lines gathered so far for a file token, from line number `after`

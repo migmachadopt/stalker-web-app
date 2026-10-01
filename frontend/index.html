@@ -395,6 +395,7 @@
         try { return localStorage.getItem('vod:captions') !== 'off'; } catch (_) { return true; }
       });
       const textTrackRef = useRef(null);
+      const recoveryRef = useRef({ attempts: 0, resumeAt: null, stallTimer: null, lastGood: 0 });
       const videoRef = useRef(null);
       const gridRequest = useRef(0);
       const lastSaved = useRef(0);
@@ -590,9 +591,74 @@
         setContinueList(readContinue().filter(e => e.type === type));
       };
 
+      // A dropped connection must not end the film: load it again at the same point
+      const MAX_RECOVERIES = 4;
+
+      const recoverPlayback = (reason) => {
+        const video = videoRef.current;
+        const recovery = recoveryRef.current;
+        if (!video || !playing) return;
+
+        clearTimeout(recovery.stallTimer);
+
+        // A minute of good playback since the last problem: start counting again
+        if (Date.now() - recovery.lastGood > 60000) recovery.attempts = 0;
+
+        if (recovery.attempts >= MAX_RECOVERIES) {
+          setPlayerError(reason === 'decode'
+            ? 'This title cannot be played by this browser. Close the player and download it instead.'
+            : 'The connection to this title was lost. Close the player and try again.');
+          return;
+        }
+
+        recovery.attempts++;
+        recovery.lastGood = Date.now();
+        recovery.resumeAt = video.currentTime;
+        setPlayerError(`Reconnecting... (${recovery.attempts}/${MAX_RECOVERIES})`);
+
+        setTimeout(() => {
+          if (videoRef.current !== video) return;
+          video.load();
+          video.play().catch(() => {});
+        }, recovery.attempts * 800);
+      };
+
+      const handleVideoError = (e) => {
+        const code = e.currentTarget.error ? e.currentTarget.error.code : 0;
+        recoverPlayback(code === 3 || code === 4 ? 'decode' : 'network');
+      };
+
+      // Stuck waiting for data for a while counts as a lost connection too
+      const handleWaiting = () => {
+        const recovery = recoveryRef.current;
+        clearTimeout(recovery.stallTimer);
+        recovery.stallTimer = setTimeout(() => {
+          const video = videoRef.current;
+          if (video && !video.paused && video.readyState < 3) recoverPlayback('stalled');
+        }, 12000);
+      };
+
+      const handlePlaying = () => {
+        clearTimeout(recoveryRef.current.stallTimer);
+        setPlayerError('');
+      };
+
+      useEffect(() => {
+        recoveryRef.current.attempts = 0;
+        recoveryRef.current.resumeAt = null;
+        return () => clearTimeout(recoveryRef.current.stallTimer);
+      }, [playing && playing.streamUrl]);
+
       // Continue where the viewer left off
       const handleLoadedMetadata = (e) => {
         const video = e.currentTarget;
+
+        if (recoveryRef.current.resumeAt !== null) {
+          video.currentTime = recoveryRef.current.resumeAt;
+          recoveryRef.current.resumeAt = null;
+          return;
+        }
+
         let saved = 0;
         try { saved = Number(localStorage.getItem(playing.key)) || 0; } catch (_) {}
         if (saved > 30 && (!isFinite(video.duration) || saved < video.duration - 60)) {
@@ -935,7 +1001,9 @@
                 autoPlay
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
-                onError={() => setPlayerError('This title cannot be played by this browser. Close the player and download it instead.')}
+                onError={handleVideoError}
+                onWaiting={handleWaiting}
+                onPlaying={handlePlaying}
               />
               {playerError && <div className="player-notice">{playerError}</div>}
               <PlayerControls
