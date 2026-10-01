@@ -1968,3 +1968,305 @@ video {
   .vod-row-scroller { padding-left: 16px; padding-right: 16px; }
   .vod-hero { padding-left: 16px; padding-right: 16px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   RECORDINGS GUIDE (programme timeline)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.section-host {
+  flex: 1;
+  min-width: 0;
+}
+
+.guide-select {
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  max-width: 200px;
+}
+
+.guide-days {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 32px;
+  border-bottom: 1px solid var(--border-secondary);
+  flex-shrink: 0;
+}
+
+.guide-days .theme-option {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 0.75rem;
+}
+
+.guide-legend {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.guide-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  margin-left: 10px;
+  border: 1px solid var(--border-secondary);
+}
+
+.guide-legend i.available { background: var(--accent-subtle); border-color: var(--accent-primary); }
+.guide-legend i.live { background: var(--accent-primary); border-color: var(--accent-primary); }
+.guide-legend i.future { background: var(--bg-tertiary); }
+
+.guide-now-btn {
+  margin-left: 12px;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--status-error);
+  color: var(--status-error);
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.guide-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.guide-inner {
+  position: relative;
+  min-height: 100%;
+}
+
+.guide-header {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  height: 34px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.guide-corner {
+  position: sticky;
+  left: 0;
+  z-index: 7;
+  width: 210px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-secondary);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+
+.guide-hour {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  border-left: 1px solid var(--border-secondary);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.guide-row {
+  display: flex;
+  height: 62px;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.guide-channel {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  width: 210px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-secondary);
+}
+
+.guide-channel img {
+  width: 38px;
+  height: 38px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.guide-channel > div {
+  min-width: 0;
+}
+
+.guide-channel-name {
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guide-channel-number {
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+}
+
+.guide-track {
+  position: relative;
+  flex-shrink: 0;
+  background-image: linear-gradient(to right, var(--border-secondary) 1px, transparent 1px);
+  background-size: 240px 100%;
+}
+
+.guide-track-note {
+  position: sticky;
+  left: 226px;
+  display: inline-block;
+  margin-top: 21px;
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.guide-prog {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  padding: 6px 8px;
+  overflow: hidden;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-secondary);
+  border-left-width: 3px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.guide-prog-name {
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.guide-prog-time {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.guide-prog.available {
+  background: var(--accent-subtle);
+  border-left-color: var(--accent-primary);
+}
+
+.guide-prog.available:hover {
+  border-color: var(--accent-primary);
+}
+
+.guide-prog.live {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.guide-prog.live .guide-prog-name,
+.guide-prog.live .guide-prog-time {
+  color: var(--bg-primary);
+}
+
+.guide-prog.future,
+.guide-prog.unavailable {
+  opacity: 0.55;
+}
+
+.guide-prog.future:hover,
+.guide-prog.unavailable:hover {
+  opacity: 0.85;
+}
+
+.guide-now {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 3;
+  width: 2px;
+  background: var(--status-error);
+  pointer-events: none;
+}
+
+.guide-detail {
+  width: 680px;
+}
+
+.vod-detail-top img.guide-detail-logo {
+  width: 96px;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: var(--bg-tertiary);
+  padding: 10px;
+}
+
+@media (max-width: 720px) {
+  .guide-days { padding-left: 16px; padding-right: 16px; }
+  .guide-legend { display: none; }
+}
+
+/* Programme info inside the channel archive list */
+.archive-row.unavailable {
+  opacity: 1;
+}
+
+.archive-row.unavailable .archive-time,
+.archive-row.unavailable .archive-name {
+  opacity: 0.45;
+}
+
+.archive-row.open {
+  border-bottom-color: transparent;
+}
+
+.archive-actions button.active {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.archive-info {
+  padding: 2px 12px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.archive-info-meta {
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.guide-track-note.retry {
+  cursor: pointer;
+}
+
+.guide-track-note.retry:hover {
+  color: var(--accent-primary);
+}

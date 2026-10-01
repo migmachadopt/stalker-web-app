@@ -467,6 +467,316 @@
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // RECORDINGS GUIDE - programme timeline per channel
+    // ═══════════════════════════════════════════════════════════════════════
+
+    const GUIDE_PPM = 4;               // pixels per minute
+    const GUIDE_DAY_WIDTH = 1440 * GUIDE_PPM;
+    const GUIDE_CHANNEL_WIDTH = 210;
+    const CHANNEL_LOGO_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%231a1a2e" width="100" height="100"/><text x="50" y="55" text-anchor="middle" fill="%23667eea" font-size="30">TV</text></svg>';
+
+    function GuideBrowser({ channels, genres, onPlay, onDownload, onWatchLive }) {
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const localDate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      const clockTime = (ts) => { const d = new Date(ts * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+
+      const [date, setDate] = useState(localDate(new Date()));
+      const [genre, setGenre] = useState('all');
+      const [searchTerm, setSearchTerm] = useState('');
+      const [epg, setEpg] = useState({});            // `${date}:${channelId}` -> { programs } | { error }
+      const [selected, setSelected] = useState(null); // { channel, program }
+      const [now, setNow] = useState(Date.now());
+      const [busy, setBusy] = useState(false);
+      const [actionError, setActionError] = useState('');
+      const scrollRef = useRef(null);
+      const queueRef = useRef([]);
+      const runningRef = useRef(0);
+      const requestedRef = useRef(new Set());
+
+      const archiveChannels = channels.filter(c => c.archive);
+      const maxHours = archiveChannels.reduce((max, c) => Math.max(max, c.archiveHours || 0), 24);
+
+      // Days kept by the provider, newest first
+      const days = Array.from({ length: Math.ceil(maxHours / 24) + 1 }, (_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday'
+          : d.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: '2-digit' });
+        return { date: localDate(d), label };
+      });
+
+      const term = searchTerm.trim().toLowerCase();
+      const rows = archiveChannels
+        .filter(c => genre === 'all' || c.tv_genre_id === genre)
+        .filter(c => !term || c.name.toLowerCase().includes(term) || String(c.number).includes(term))
+        .sort((a, b) => a.number - b.number);
+      const rowsKey = rows.map(c => c.id).join(',');
+
+      const dayStart = Math.floor(new Date(`${date}T00:00:00`).getTime() / 1000);
+      const nowSeconds = Math.floor(now / 1000);
+      const isToday = date === localDate(new Date(now));
+      const nowMinutes = (nowSeconds - dayStart) / 60;
+
+      // Guides are loaded only for the rows on screen, two channels at a time
+      const pump = () => {
+        while (runningRef.current < 2 && queueRef.current.length) {
+          const job = queueRef.current.shift();
+          runningRef.current++;
+          api.iptvGetEpg(job.channelId, job.date)
+            .then(data => setEpg(prev => ({
+              ...prev,
+              [job.key]: data.success ? { programs: data.programs } : { error: data.error || 'Guide not available' }
+            })))
+            .catch(() => setEpg(prev => ({ ...prev, [job.key]: { error: 'Guide not available' } })))
+            .finally(() => { runningRef.current--; pump(); });
+        }
+      };
+
+      const retryEpg = (channelId, day) => {
+        const key = `${day}:${channelId}`;
+        requestedRef.current.delete(key);
+        setEpg(prev => { const next = { ...prev }; delete next[key]; return next; });
+        requestEpg(channelId, day);
+      };
+
+      const requestEpg = (channelId, day) => {
+        const key = `${day}:${channelId}`;
+        if (requestedRef.current.has(key)) return;
+        requestedRef.current.add(key);
+        // Rows that just came into view go first
+        queueRef.current.unshift({ key, channelId, date: day });
+        pump();
+      };
+
+      useEffect(() => {
+        const root = scrollRef.current;
+        if (!root) return;
+
+        // Drop what was queued for another day or filter
+        queueRef.current.forEach(job => requestedRef.current.delete(job.key));
+        queueRef.current = [];
+
+        const observer = new IntersectionObserver((entries) => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting) requestEpg(entry.target.dataset.channelId, date);
+          });
+        }, { root, rootMargin: '300px 0px' });
+
+        root.querySelectorAll('.guide-row').forEach(row => observer.observe(row));
+        return () => observer.disconnect();
+      }, [date, rowsKey]);
+
+      // Keep the "now" marker moving
+      useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), 60000);
+        return () => clearInterval(timer);
+      }, []);
+
+      const scrollToMinute = (minute) => {
+        const root = scrollRef.current;
+        if (root) root.scrollLeft = Math.max(0, minute * GUIDE_PPM - 120);
+      };
+
+      // Open on the current time
+      useEffect(() => {
+        const d = new Date();
+        scrollToMinute(d.getHours() * 60 + d.getMinutes() - 60);
+      }, []);
+
+      useEffect(() => {
+        const onKey = (e) => { if (e.key === 'Escape') setSelected(null); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, []);
+
+      const programState = (program) => {
+        if (program.stop <= nowSeconds) return program.archive ? 'available' : 'unavailable';
+        if (program.start <= nowSeconds) return 'live';
+        return 'future';
+      };
+
+      const openProgram = (channel, program) => {
+        setActionError('');
+        setSelected({ channel, program });
+      };
+
+      const run = async (action) => {
+        if (busy) return;
+        setBusy(true);
+        setActionError('');
+        try {
+          await action();
+        } catch (err) {
+          setActionError(err.message || 'Not available');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const selectedState = selected && programState(selected.program);
+      const canPlaySelected = selected && selected.program.archive && selected.program.start <= nowSeconds;
+
+      return (
+        <div className="vod-browser">
+          <div className="vod-topbar">
+            <h2>Recordings</h2>
+            <select className="guide-select" value={genre} onChange={(e) => setGenre(e.target.value)}>
+              <option value="all">All groups</option>
+              {genres.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+            </select>
+            <div className="search-container vod-search">
+              <span className="search-icon">🔍</span>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search channels..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="guide-days">
+            {days.map(day => (
+              <button
+                key={day.date}
+                className={`theme-option ${date === day.date ? 'active' : ''}`}
+                onClick={() => setDate(day.date)}
+              >
+                {day.label}
+              </button>
+            ))}
+            <span className="guide-legend">
+              <i className="available"></i> recorded
+              <i className="live"></i> on now
+              <i className="future"></i> upcoming
+            </span>
+            {isToday && <button className="guide-now-btn" onClick={() => scrollToMinute(nowMinutes - 60)}>Now</button>}
+          </div>
+
+          {rows.length === 0 ? (
+            <div className="vod-message">
+              {archiveChannels.length === 0
+                ? 'None of your channels keeps recordings.'
+                : 'No channels match this filter.'}
+            </div>
+          ) : (
+            <div className="guide-scroll" ref={scrollRef}>
+              <div className="guide-inner" style={{ width: GUIDE_CHANNEL_WIDTH + GUIDE_DAY_WIDTH }}>
+                <div className="guide-header">
+                  <div className="guide-corner">{days.find(d => d.date === date)?.label}</div>
+                  {Array.from({ length: 24 }, (_, hour) => (
+                    <div key={hour} className="guide-hour" style={{ width: 60 * GUIDE_PPM }}>{pad2(hour)}:00</div>
+                  ))}
+                </div>
+
+                {isToday && nowMinutes >= 0 && nowMinutes <= 1440 && (
+                  <div className="guide-now" style={{ left: GUIDE_CHANNEL_WIDTH + nowMinutes * GUIDE_PPM }}></div>
+                )}
+
+                {rows.map(channel => {
+                  const state = epg[`${date}:${channel.id}`];
+                  return (
+                    <div key={channel.id} className="guide-row" data-channel-id={channel.id}>
+                      <div className="guide-channel" title={`${channel.name} · keeps ${Math.round(channel.archiveHours / 24)} days`}>
+                        <img
+                          src={channel.logo || CHANNEL_LOGO_FALLBACK}
+                          alt=""
+                          loading="lazy"
+                          onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                        />
+                        <div>
+                          <div className="guide-channel-name">{channel.name}</div>
+                          <div className="guide-channel-number">Ch. {channel.number}</div>
+                        </div>
+                      </div>
+                      <div className="guide-track" style={{ width: GUIDE_DAY_WIDTH }}>
+                        {!state && <div className="guide-track-note">Loading guide...</div>}
+                        {state?.error && (
+                          <div className="guide-track-note retry" onClick={() => retryEpg(channel.id, date)}>
+                            {state.error} · click to retry
+                          </div>
+                        )}
+                        {state?.programs && state.programs.length === 0 && (
+                          <div className="guide-track-note">No programme guide for this day</div>
+                        )}
+                        {state?.programs && state.programs.map(program => {
+                          const startMinute = Math.max(0, (program.start - dayStart) / 60);
+                          const endMinute = Math.min(1440, (program.stop - dayStart) / 60);
+                          if (endMinute <= startMinute) return null;
+                          return (
+                            <div
+                              key={program.id}
+                              className={`guide-prog ${programState(program)}`}
+                              style={{ left: startMinute * GUIDE_PPM, width: (endMinute - startMinute) * GUIDE_PPM - 2 }}
+                              title={`${clockTime(program.start)} – ${clockTime(program.stop)}  ${program.name}`}
+                              onClick={() => openProgram(channel, program)}
+                            >
+                              <div className="guide-prog-name">{program.name}</div>
+                              <div className="guide-prog-time">{clockTime(program.start)} – {clockTime(program.stop)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {selected && (
+            <div className="modal-overlay" onClick={() => setSelected(null)}>
+              <div className="modal vod-detail guide-detail" onClick={e => e.stopPropagation()}>
+                <button className="vod-close" onClick={() => setSelected(null)} title="Close">×</button>
+                <div className="vod-detail-top">
+                  <img
+                    className="guide-detail-logo"
+                    src={selected.channel.logo || CHANNEL_LOGO_FALLBACK}
+                    alt=""
+                    onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                  />
+                  <div className="vod-detail-text">
+                    <h2>{selected.program.name}</h2>
+                    <div className="vod-meta">
+                      <span>{selected.channel.name}</span>
+                      <span>{days.find(d => d.date === date)?.label}</span>
+                      <span>{clockTime(selected.program.start)} – {clockTime(selected.program.stop)}</span>
+                      <span>{Math.round((selected.program.stop - selected.program.start) / 60)} min</span>
+                    </div>
+                    <p>{selected.program.descr || 'No description available.'}</p>
+
+                    <div className="vod-actions">
+                      {canPlaySelected && (
+                        <button className="vod-play" disabled={busy} onClick={() => run(async () => { await onPlay(selected.channel, date, selected.program); setSelected(null); })}>
+                          {selectedState === 'live' ? '▶ Play from start' : '▶ Play'}
+                        </button>
+                      )}
+                      {canPlaySelected && (
+                        <button className="vod-secondary" disabled={busy} onClick={() => run(() => onDownload(selected.channel, date, selected.program))}>
+                          ⬇ Download
+                        </button>
+                      )}
+                      {selectedState === 'live' && (
+                        <button className="vod-secondary" onClick={() => onWatchLive(selected.channel)}>🔴 Watch live</button>
+                      )}
+                    </div>
+                    {!canPlaySelected && selectedState !== 'live' && (
+                      <div className="vod-credits">
+                        {selectedState === 'future' ? 'This programme has not aired yet.' : 'This programme is not in the archive.'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {actionError && <div className="error-msg">{actionError}</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function App() {
       // Auth state
       const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -475,7 +785,8 @@
       
       // UI state
       const [screen, setScreen] = useState('login');
-      const [section, setSection] = useState('tv'); // 'tv' | 'vod' | 'series'
+      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'vod' | 'series'
+      const [guideOpened, setGuideOpened] = useState(false); // keeps the guide mounted once visited
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
       const [loadingProgress, setLoadingProgress] = useState('');
@@ -510,6 +821,7 @@
       const [archivePrograms, setArchivePrograms] = useState([]);
       const [archiveLoading, setArchiveLoading] = useState(false);
       const [archiveError, setArchiveError] = useState('');
+      const [archiveInfoId, setArchiveInfoId] = useState(null); // programme whose description is open
       const [intervalFrom, setIntervalFrom] = useState('20:00');
       const [intervalTo, setIntervalTo] = useState('21:00');
       
@@ -684,6 +996,7 @@
         setArchiveChannel(null);
         setArchivePlayback(null);
         setSection('tv');
+        setGuideOpened(false);
         setScreen('login');
         setError('');
         setSuccess('');
@@ -1003,6 +1316,7 @@
 
       const loadArchiveDay = async (channel, date) => {
         setArchiveDate(date);
+        setArchiveInfoId(null);
         setArchivePrograms([]);
         setArchiveError('');
         setArchiveLoading(true);
@@ -1192,7 +1506,50 @@
         setCurrentChannel(null);
         setArchivePlayback(null);
         setArchiveChannel(null);
+        if (next === 'guide') setGuideOpened(true);
         setSection(next);
+      };
+
+      // ── Recordings guide actions ──────────────────────────────────────────
+      
+      const guideWindow = (date, program) => ({
+        date,
+        programId: program.id,
+        title: `${program.name} ${date} ${clockTime(program.start).replace(':', '.')}`
+      });
+
+      // Plays in the TV player; the guide stays mounted to come back to
+      const playGuideProgram = async (channel, date, program) => {
+        const data = await requestArchive(channel, guideWindow(date, program));
+        
+        cancelLiveRetry();
+        setPlayerNotice('');
+        setSection('tv');
+        setCurrentChannel(channel);
+        setArchivePlayback({
+          channel,
+          title: `${program.name} · ${clockTime(program.start)}`,
+          start: data.start,
+          duration: data.duration,
+          streamUrl: data.streamUrl,
+          fromGuide: true
+        });
+        
+        // The video element exists only after the TV player has rendered
+        for (let i = 0; i < 20 && !videoRef.current; i++) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        loadArchiveStream(data.streamUrl, 0);
+      };
+
+      const downloadGuideProgram = async (channel, date, program) => {
+        const data = await requestArchive(channel, guideWindow(date, program));
+        startDownload(data.streamUrl);
+      };
+
+      const watchLiveFromGuide = (channel) => {
+        setSection('tv');
+        playChannel(channel);
       };
 
       const toggleFullscreen = () => { 
@@ -1297,7 +1654,7 @@
               <div className={`nav-item ${section === 'series' ? 'active' : ''}`} title="Series" onClick={() => switchSection('series')}>📽️</div>
             )}
             <div className="nav-divider"></div>
-            <div className="nav-item" title="EPG Guide (Coming Soon)" style={{opacity: 0.3, cursor: 'not-allowed'}}>📅</div>
+            <div className={`nav-item ${section === 'guide' ? 'active' : ''}`} title="Recordings" onClick={() => switchSection('guide')}>📅</div>
             <div className="nav-divider"></div>
             <div className="nav-item" title="Preferences" onClick={() => setShowPreferences(true)}>🎨</div>
             <div className="nav-item" title="Change Password" onClick={() => setShowChangePassword(true)}>🔐</div>
@@ -1308,7 +1665,19 @@
             <div className="nav-item nav-item-danger" title="Sign Out" onClick={handleLogout}>🚪</div>
           </div>
 
-          {section !== 'tv' && <VodBrowser key={section} type={section} />}
+          {(section === 'vod' || section === 'series') && <VodBrowser key={section} type={section} />}
+
+          {guideOpened && (
+            <div className="section-host" style={{ display: section === 'guide' ? 'flex' : 'none' }}>
+              <GuideBrowser
+                channels={channels}
+                genres={genres}
+                onPlay={playGuideProgram}
+                onDownload={downloadGuideProgram}
+                onWatchLive={watchLiveFromGuide}
+              />
+            </div>
+          )}
 
           {section === 'tv' && (
           <React.Fragment>
@@ -1484,6 +1853,9 @@
                         <button onClick={() => seekArchive(archivePos + 300)}>+5 min</button>
                         <button onClick={() => startDownload(archivePlayback.streamUrl)}>⬇ Download</button>
                         <button onClick={() => playChannel(archivePlayback.channel)}>🔴 Live</button>
+                        {archivePlayback.fromGuide && (
+                          <button onClick={() => switchSection('guide')}>📅 Back to recordings</button>
+                        )}
                       </div>
                     </div>
                   )}
@@ -1551,17 +1923,36 @@
                   {archivePrograms.map(program => {
                     const started = program.start <= Date.now() / 1000;
                     const available = program.archive && started;
+                    const infoOpen = archiveInfoId === program.id;
                     return (
-                      <div key={program.id} className={`archive-row ${available ? '' : 'unavailable'}`} title={program.descr}>
-                        <span className="archive-time">{clockTime(program.start)} – {clockTime(program.stop)}</span>
-                        <span className="archive-name">{program.name}</span>
-                        {available && (
+                      <React.Fragment key={program.id}>
+                        <div className={`archive-row ${available ? '' : 'unavailable'} ${infoOpen ? 'open' : ''}`}>
+                          <span className="archive-time">{clockTime(program.start)} – {clockTime(program.stop)}</span>
+                          <span className="archive-name">{program.name}</span>
                           <span className="archive-actions">
-                            <button type="button" title="Play" onClick={() => playArchiveProgram(program)}>▶</button>
-                            <button type="button" title="Download" onClick={() => downloadArchiveProgram(program)}>⬇</button>
+                            <button
+                              type="button"
+                              title="Programme info"
+                              className={infoOpen ? 'active' : ''}
+                              onClick={() => setArchiveInfoId(infoOpen ? null : program.id)}
+                            >
+                              ⓘ
+                            </button>
+                            {available && <button type="button" title="Play" onClick={() => playArchiveProgram(program)}>▶</button>}
+                            {available && <button type="button" title="Download" onClick={() => downloadArchiveProgram(program)}>⬇</button>}
                           </span>
+                        </div>
+                        {infoOpen && (
+                          <div className="archive-info">
+                            <div className="archive-info-meta">
+                              {Math.round((program.stop - program.start) / 60)} min
+                              {!program.archive && ' · not in the archive'}
+                              {program.archive && !started && ' · not aired yet'}
+                            </div>
+                            {program.descr || 'No description available.'}
+                          </div>
                         )}
-                      </div>
+                      </React.Fragment>
                     );
                   })}
                 </div>

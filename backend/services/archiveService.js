@@ -11,7 +11,7 @@ const TIMESHIFT_PATTERN = /(\/timeshift\/[^/]+\/[^/]+\/)(\d+)\/(\d{4})-(\d{2})-(
 
 class ArchiveService {
   constructor() {
-    this.epgCache = new Map(); // `${userId}:${channelId}:${date}` -> { at, programs }
+    this.epgCache = new Map(); // `${portal}:${channelId}:${date}` -> { at, programs }
   }
 
   // Programmes of one channel for one day (YYYY-MM-DD, portal timezone)
@@ -20,16 +20,21 @@ class ArchiveService {
       throw new Error('Invalid date');
     }
 
-    const key = `${userId}:${channelId}:${date}`;
+    // The guide is the same for every account of a portal
+    const key = `${iptvService.getPortalKey(sessionId)}:${channelId}:${date}`;
     const cached = this.epgCache.get(key);
 
-    if (cached && Date.now() - cached.at < config.EPG_CACHE_TTL) {
+    // A finished day no longer changes; today's guide still does
+    const today = new Date().toISOString().slice(0, 10);
+    const ttl = date < today ? config.EPG_PAST_CACHE_TTL : config.EPG_CACHE_TTL;
+
+    if (cached && Date.now() - cached.at < ttl) {
       return cached.programs;
     }
 
     const programs = await iptvService.getEpgDay(sessionId, channelId, date);
 
-    if (this.epgCache.size > 300) {
+    if (this.epgCache.size > 3000) {
       this.epgCache.clear();
     }
     this.epgCache.set(key, { at: Date.now(), programs });

@@ -499,20 +499,41 @@ class IPTVService {
     };
   }
 
+  // Resolves when the next guide request may start: one every
+  // GUIDE_REQUEST_SPACING ms, and none while the portal is rate limiting
+  guideSlot() {
+    const turn = (this.guideQueue || Promise.resolve()).then(async () => {
+      const pause = (this.guidePausedUntil || 0) - Date.now();
+      await new Promise(resolve => setTimeout(resolve, Math.max(pause, config.GUIDE_REQUEST_SPACING)));
+    });
+    this.guideQueue = turn;
+    return turn;
+  }
+
   // Programme guide of one channel for one day, all pages
   async getEpgDay(sessionId, channelId, date) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error('Invalid session');
 
+    // The portal answers 429 to bursts, so guide pages are spaced out and a
+    // refused page is asked again after a pause
     const fetchPage = async (page) => {
-      const response = await axios.get(
-        `${session.portalUrl}?type=epg&action=get_simple_data_table&ch_id=${encodeURIComponent(channelId)}&date=${date}&p=${page}&JsHttpRequest=1-xml`,
-        {
-          headers: this.getStalkerHeaders(session.token, session.macAddress),
-          timeout: 15000
+      for (let attempt = 1; ; attempt++) {
+        await this.guideSlot();
+        try {
+          const response = await axios.get(
+            `${session.portalUrl}?type=epg&action=get_simple_data_table&ch_id=${encodeURIComponent(channelId)}&date=${date}&p=${page}&JsHttpRequest=1-xml`,
+            {
+              headers: this.getStalkerHeaders(session.token, session.macAddress),
+              timeout: 15000
+            }
+          );
+          return response.data?.js || {};
+        } catch (error) {
+          if (error.response?.status !== 429 || attempt >= 4) throw error;
+          this.guidePausedUntil = Date.now() + attempt * 2000;
         }
-      );
-      return response.data?.js || {};
+      }
     };
 
     let first = await fetchPage(1);
