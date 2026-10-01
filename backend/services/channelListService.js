@@ -57,6 +57,7 @@ class ChannelListService {
 
   isStale(list) {
     if (!list || !list.updatedAt) return true;
+    if (list.version !== config.CHANNEL_LIST_VERSION) return true;
     return Date.now() - new Date(list.updatedAt).getTime() > config.CHANNEL_LIST_MAX_AGE;
   }
 
@@ -101,6 +102,7 @@ class ChannelListService {
       });
 
       const list = {
+        version: config.CHANNEL_LIST_VERSION,
         updatedAt: new Date().toISOString(),
         genres: Array.from(groups.values()),
         channels

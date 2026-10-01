@@ -56,32 +56,65 @@ const api = {
   },
   
   // IPTV
+  // The portal session id is kept here; when the server no longer has it
+  // (restart, idle timeout) the call reconnects and is retried once.
+  iptvSessionId: '',
+  _connecting: null,
+  
   async iptvConnect() {
-    return this.fetch('/iptv/connect', { method: 'POST' });
+    if (!this._connecting) {
+      this._connecting = this.fetch('/iptv/connect', { method: 'POST' })
+        .then(data => {
+          if (data.success) this.iptvSessionId = data.sessionId;
+          return data;
+        })
+        .finally(() => { this._connecting = null; });
+    }
+    return this._connecting;
   },
   
-  async iptvGetChannels(sessionId, refresh = false) {
-    return this.fetch('/iptv/channels', { 
+  async iptvCall(endpoint, body = {}) {
+    const send = () => this.fetch(endpoint, { 
       method: 'POST', 
-      body: JSON.stringify({ sessionId, refresh }) 
+      body: JSON.stringify({ sessionId: this.iptvSessionId, ...body }) 
     });
+    
+    let data = await send();
+    
+    if (!data.success && data.error === 'Invalid IPTV session') {
+      const connect = await this.iptvConnect();
+      if (!connect.success) return connect;
+      data = await send();
+    }
+    
+    return data;
   },
   
-  async iptvGetStream(sessionId, channelId) {
-    return this.fetch('/iptv/stream', { 
-      method: 'POST', 
-      body: JSON.stringify({ sessionId, channelId }) 
-    });
+  async iptvGetChannels(refresh = false) {
+    return this.iptvCall('/iptv/channels', { refresh });
   },
   
-  async iptvWatchdog(sessionId) {
-    return this.fetch('/iptv/watchdog', { 
-      method: 'POST', 
-      body: JSON.stringify({ sessionId }) 
-    });
+  async iptvGetStream(channelId) {
+    return this.iptvCall('/iptv/stream', { channelId });
   },
   
-  async iptvDisconnect(sessionId) {
+  async iptvGetEpg(channelId, date) {
+    return this.iptvCall('/iptv/epg', { channelId, date });
+  },
+  
+  // window: { date, programId, start?, duration?, title }
+  async iptvGetArchiveStream(channelId, window) {
+    return this.iptvCall('/iptv/archive/stream', { channelId, ...window });
+  },
+  
+  async iptvWatchdog() {
+    return this.iptvCall('/iptv/watchdog');
+  },
+  
+  async iptvDisconnect() {
+    const sessionId = this.iptvSessionId;
+    this.iptvSessionId = '';
+    if (!sessionId) return { success: true };
     return this.fetch('/iptv/disconnect', { 
       method: 'POST', 
       body: JSON.stringify({ sessionId }) 

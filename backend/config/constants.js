@@ -23,6 +23,12 @@ module.exports = {
 
   // Channel list cache
   CHANNEL_LIST_MAX_AGE: 24 * 60 * 60 * 1000, // 24 hours
+  CHANNEL_LIST_VERSION: 2, // bump when the stored channel fields change
+  
+  // TV archive (catch-up)
+  EPG_CACHE_TTL: 5 * 60 * 1000, // 5 minutes
+  ARCHIVE_TOKEN_EXPIRY: 12 * 60 * 60 * 1000, // 12 hours
+  ARCHIVE_MAX_WINDOW: 12 * 60 * 60, // 12 hours, in seconds
 
   // IPTV
   STALKER_HEADERS: {
@@ -35,6 +41,7 @@ module.exports = {
   
   // Session
   SESSION_TIMEOUT: 60 * 60 * 1000, // 1 hour
+  SESSION_IDLE_TIMEOUT: 15 * 60 * 1000, // portal session closed after 15 min without any client
   WATCHDOG_INTERVAL: 60 * 1000, // 60 seconds
   
   // Stream

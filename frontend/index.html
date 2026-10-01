@@ -61,6 +61,25 @@
       const playerRef = useRef(null);
       const watchdogIntervalRef = useRef(null);
       
+      // Archive (catch-up) browser
+      const [archiveChannel, setArchiveChannel] = useState(null);
+      const [archiveDate, setArchiveDate] = useState('');
+      const [archivePrograms, setArchivePrograms] = useState([]);
+      const [archiveLoading, setArchiveLoading] = useState(false);
+      const [archiveError, setArchiveError] = useState('');
+      const [intervalFrom, setIntervalFrom] = useState('20:00');
+      const [intervalTo, setIntervalTo] = useState('21:00');
+      
+      // Archive playback: { channel, title, start, duration, streamUrl }
+      const [archivePlayback, setArchivePlayback] = useState(null);
+      const [archivePos, setArchivePos] = useState(0);
+      const [seekDraft, setSeekDraft] = useState(null);
+      const archiveBaseRef = useRef(0);
+      
+      // Live playback recovery
+      const [playerNotice, setPlayerNotice] = useState('');
+      const liveRetryRef = useRef({ count: 0, timer: null, startedAt: 0 });
+      
       // Modals
       const [showChangePassword, setShowChangePassword] = useState(false);
       const [showPreferences, setShowPreferences] = useState(false);
@@ -180,7 +199,7 @@
           // Cleanup
           if (iptvSessionId) {
             try {
-              await api.iptvDisconnect(iptvSessionId);
+              await api.iptvDisconnect();
             } catch (err) {
               // Silent fail
             }
@@ -190,6 +209,9 @@
             clearInterval(watchdogIntervalRef.current);
             watchdogIntervalRef.current = null;
           }
+          
+          cancelLiveRetry();
+          setPlayerNotice('');
           
           if (playerRef.current) {
             try {
@@ -216,6 +238,8 @@
         setShowChannels(false);
         setSearchTerm('');
         setCurrentChannel(null); 
+        setArchiveChannel(null);
+        setArchivePlayback(null);
         setScreen('login');
         setError('');
         setSuccess('');
@@ -269,7 +293,7 @@
           
           // Load channel list (stored on the server, re-read from the portal once a day)
           setLoadingProgress('Loading channels...');
-          await loadChannelList(sessionId, false);
+          await loadChannelList(false);
           
           // Start watchdog
           startWatchdog(sessionId);
@@ -281,8 +305,8 @@
         }
       };
 
-      const loadChannelList = async (sessionId, refresh) => {
-        const chData = await api.iptvGetChannels(sessionId, refresh);
+      const loadChannelList = async (refresh) => {
+        const chData = await api.iptvGetChannels(refresh);
         
         if (!chData.success) {
           throw new Error(chData.error || 'Failed to load channels');
@@ -314,7 +338,7 @@
         setListError('');
         
         try {
-          await loadChannelList(iptvSessionId, true);
+          await loadChannelList(true);
           
           // The selected group may have been removed or hidden meanwhile
           setShowChannels(false);
@@ -332,7 +356,7 @@
         }
         
         watchdogIntervalRef.current = setInterval(() => {
-          api.iptvWatchdog(sessionId).catch(() => {
+          api.iptvWatchdog().catch(() => {
             // Silent fail - watchdog is best-effort
           });
         }, 60000); // 60 seconds
@@ -376,21 +400,56 @@
       // PLAYER FUNCTIONS
       // ═══════════════════════════════════════════════════════════════════════
       
-      const playChannel = async (channel) => {
+      const MAX_LIVE_RETRIES = 5;
+
+      const cancelLiveRetry = () => {
+        clearTimeout(liveRetryRef.current.timer);
+        liveRetryRef.current.timer = null;
+      };
+
+      // A live stream that drops is requested again, like a set-top box does
+      const scheduleLiveRetry = (channel) => {
+        const retry = liveRetryRef.current;
+        cancelLiveRetry();
+        
+        // It had been playing fine for a while: this is a new incident
+        if (retry.startedAt && Date.now() - retry.startedAt > 60000) retry.count = 0;
+        retry.startedAt = 0;
+        
+        if (retry.count >= MAX_LIVE_RETRIES) {
+          setPlayerNotice('Stream unavailable. Select the channel again to retry.');
+          return;
+        }
+        
+        retry.count++;
+        setPlayerNotice(`Reconnecting... (${retry.count}/${MAX_LIVE_RETRIES})`);
+        retry.timer = setTimeout(() => playChannel(channel, true), Math.min(retry.count * 1000, 5000));
+      };
+
+      const playChannel = async (channel, isRetry = false) => {
+        cancelLiveRetry();
+        if (!isRetry) {
+          liveRetryRef.current.count = 0;
+          setPlayerNotice('');
+        }
+        
         setCurrentChannel(channel);
+        setArchivePlayback(null);
         
         try {
-          const data = await api.iptvGetStream(iptvSessionId, channel.id);
+          const data = await api.iptvGetStream(channel.id);
           
           if (data.success && data.streamUrl) {
-            loadStream(data.streamUrl, data.streamType);
+            loadStream(data.streamUrl, data.streamType, channel);
+          } else {
+            scheduleLiveRetry(channel);
           }
         } catch (err) { 
-          console.error('Stream error');
+          scheduleLiveRetry(channel);
         }
       };
 
-      const loadStream = (streamUrl, streamType) => {
+      const loadStream = (streamUrl, streamType, channel) => {
         const video = videoRef.current;
         if (!video) return;
 
@@ -402,6 +461,15 @@
 
         video.removeAttribute('src');
         video.load();
+        video.ontimeupdate = null;
+        video.onplaying = () => {
+          setPlayerNotice('');
+          liveRetryRef.current.startedAt = Date.now();
+        };
+        video.onerror = () => {
+          cancelLiveRetry();
+          setPlayerNotice('This channel cannot be decoded by this browser.');
+        };
 
         const absoluteUrl = streamUrl.startsWith('/')
           ? `${BACKEND_ORIGIN}${streamUrl}`
@@ -446,12 +514,225 @@
             enableLogging: false
           });
 
+          // Upstream closed or failed: ask for the stream again
+          const onDrop = () => {
+            if (playerRef.current !== player) return;
+            scheduleLiveRetry(channel);
+          };
+          player.on(mpegts.Events.LOADING_COMPLETE, onDrop);
+          player.on(mpegts.Events.ERROR, (type) => {
+            if (type === mpegts.ErrorTypes.NETWORK_ERROR) onDrop();
+          });
+
           player.attachMediaElement(video);
           player.load();
           video.play().catch(() => {});
 
           playerRef.current = player;
         }
+      };
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // ARCHIVE (CATCH-UP) FUNCTIONS
+      // ═══════════════════════════════════════════════════════════════════════
+      
+      const pad2 = (n) => String(n).padStart(2, '0');
+      const localDate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+      const clockTime = (ts) => { const d = new Date(ts * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+      const formatPosition = (seconds) => {
+        const s = Math.max(0, Math.floor(seconds));
+        const h = Math.floor(s / 3600);
+        return `${h > 0 ? h + ':' : ''}${h > 0 ? pad2(Math.floor((s % 3600) / 60)) : Math.floor(s / 60)}:${pad2(s % 60)}`;
+      };
+
+      // Days the channel keeps in its archive, newest first
+      const getArchiveDays = (channel) => {
+        const count = Math.max(1, Math.ceil((channel.archiveHours || 24) / 24)) + 1;
+        return Array.from({ length: count }, (_, i) => {
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          const label = i === 0 ? 'Today' : i === 1 ? 'Yesterday'
+            : d.toLocaleDateString([], { weekday: 'short', day: '2-digit', month: '2-digit' });
+          return { date: localDate(d), label };
+        });
+      };
+
+      const loadArchiveDay = async (channel, date) => {
+        setArchiveDate(date);
+        setArchivePrograms([]);
+        setArchiveError('');
+        setArchiveLoading(true);
+        
+        try {
+          const data = await api.iptvGetEpg(channel.id, date);
+          if (!data.success) throw new Error(data.error || 'Failed to load programme guide');
+          setArchivePrograms(data.programs);
+        } catch (err) {
+          setArchiveError(err.message);
+        } finally {
+          setArchiveLoading(false);
+        }
+      };
+
+      const openArchive = (channel) => {
+        setArchiveChannel(channel);
+        loadArchiveDay(channel, localDate(new Date()));
+      };
+
+      const requestArchive = async (channel, window) => {
+        const data = await api.iptvGetArchiveStream(channel.id, { date: archiveDate, ...window });
+        if (!data.success) throw new Error(data.error || 'Archive not available');
+        return data;
+      };
+
+      const programWindow = (program) => ({
+        programId: program.id,
+        title: `${program.name} ${archiveDate} ${clockTime(program.start).replace(':', '.')}`
+      });
+
+      const startDownload = (streamUrl) => {
+        const link = document.createElement('a');
+        link.href = `${BACKEND_ORIGIN}${streamUrl}?download=1`;
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      };
+
+      const playArchiveProgram = async (program) => {
+        const channel = archiveChannel;
+        setArchiveError('');
+        setCurrentChannel(channel);
+        
+        try {
+          const data = await requestArchive(channel, programWindow(program));
+          setArchivePlayback({
+            channel,
+            title: `${program.name} · ${clockTime(program.start)}`,
+            start: data.start,
+            duration: data.duration,
+            streamUrl: data.streamUrl
+          });
+          setArchiveChannel(null);
+          loadArchiveStream(data.streamUrl, 0);
+        } catch (err) {
+          setArchiveError(err.message);
+        }
+      };
+
+      const downloadArchiveProgram = async (program) => {
+        setArchiveError('');
+        try {
+          const data = await requestArchive(archiveChannel, programWindow(program));
+          startDownload(data.streamUrl);
+        } catch (err) {
+          setArchiveError(err.message);
+        }
+      };
+
+      // Download any time interval of the selected day (may run past midnight)
+      const downloadArchiveInterval = async () => {
+        setArchiveError('');
+        
+        const from = new Date(`${archiveDate}T${intervalFrom}:00`);
+        const to = new Date(`${archiveDate}T${intervalTo}:00`);
+        if (isNaN(from) || isNaN(to)) { setArchiveError('Choose a start and end time'); return; }
+        if (to <= from) to.setDate(to.getDate() + 1);
+        
+        const start = Math.floor(from.getTime() / 1000);
+        const duration = Math.floor(to.getTime() / 1000) - start;
+        
+        // The server needs one archived programme of this day to issue the link
+        const seed = archivePrograms.find(p => p.archive && p.start <= start && p.stop > start)
+          || archivePrograms.find(p => p.archive);
+        if (!seed) { setArchiveError('No archived programmes on this day'); return; }
+        
+        try {
+          const data = await requestArchive(archiveChannel, {
+            programId: seed.id,
+            start,
+            duration,
+            title: `${archiveDate} ${intervalFrom.replace(':', '.')}-${intervalTo.replace(':', '.')}`
+          });
+          startDownload(data.streamUrl);
+        } catch (err) {
+          setArchiveError(err.message);
+        }
+      };
+
+      // Archive files are finite: load lazily and seek by reopening at a position
+      const loadArchiveStream = (streamUrl, position) => {
+        const video = videoRef.current;
+        if (!video) return;
+
+        if (playerRef.current) {
+          playerRef.current.destroy?.();
+          playerRef.current = null;
+        }
+
+        video.removeAttribute('src');
+        video.load();
+
+        cancelLiveRetry();
+        setPlayerNotice('');
+        video.onplaying = () => setPlayerNotice('');
+        video.onerror = () => setPlayerNotice('This recording cannot be decoded by this browser. You can still download it.');
+
+        archiveBaseRef.current = position;
+        setArchivePos(position);
+
+        const url = `${BACKEND_ORIGIN}${streamUrl}?start=${Math.floor(position)}`;
+
+        video.oncanplay = () => { video.play().catch(() => {}); };
+        video.ontimeupdate = () => {
+          const current = Math.floor(archiveBaseRef.current + video.currentTime);
+          setArchivePos(prev => (prev === current ? prev : current));
+        };
+
+        if (!mpegts || !mpegts.isSupported()) {
+          video.src = url;
+          video.play().catch(() => {});
+          return;
+        }
+
+        const player = mpegts.createPlayer({
+          type: 'mpegts',
+          isLive: false,
+          url
+        }, {
+          enableWorker: false,
+          lazyLoad: true,
+          lazyLoadMaxDuration: 120,
+          lazyLoadRecoverDuration: 30,
+          seekType: 'range',
+          autoCleanupSourceBuffer: true,
+          enableLogging: false
+        });
+
+        player.on(mpegts.Events.ERROR, (type) => {
+          if (playerRef.current !== player) return;
+          if (type === mpegts.ErrorTypes.NETWORK_ERROR) {
+            setPlayerNotice('Archive stream interrupted. Move the position to continue.');
+          }
+        });
+
+        player.attachMediaElement(video);
+        player.load();
+        video.play().catch(() => {});
+
+        playerRef.current = player;
+      };
+
+      const seekArchive = (position) => {
+        if (!archivePlayback) return;
+        const target = Math.min(Math.max(0, position), Math.max(0, archivePlayback.duration - 5));
+        loadArchiveStream(archivePlayback.streamUrl, target);
+      };
+
+      const commitSeekDraft = () => {
+        if (seekDraft === null) return;
+        seekArchive(seekDraft);
+        setSeekDraft(null);
       };
 
       const toggleFullscreen = () => { 
@@ -670,6 +951,15 @@
                           {currentChannel?.id === channel.id && (
                             <div className="playing-indicator"></div>
                           )}
+                          {channel.archive && (
+                            <button
+                              className="archive-btn"
+                              title={`Archive (last ${Math.round(channel.archiveHours / 24)} days)`}
+                              onClick={(e) => { e.stopPropagation(); openArchive(channel); }}
+                            >
+                              ⏪
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -697,6 +987,38 @@
                   <div className="video-container">
                     <video ref={videoRef} controls />
                   </div>
+                  {playerNotice && <div className="player-notice">{playerNotice}</div>}
+                  {archivePlayback && (
+                    <div className="archive-bar">
+                      <div className="archive-bar-title">
+                        <span className="archive-badge">ARCHIVE</span>
+                        {archivePlayback.title}
+                      </div>
+                      <div className="archive-bar-seek">
+                        <span>{formatPosition(seekDraft ?? archivePos)}</span>
+                        <input
+                          type="range"
+                          min="0"
+                          max={archivePlayback.duration}
+                          step="1"
+                          value={seekDraft ?? archivePos}
+                          onChange={(e) => setSeekDraft(Number(e.target.value))}
+                          onMouseUp={commitSeekDraft}
+                          onTouchEnd={commitSeekDraft}
+                          onKeyUp={commitSeekDraft}
+                        />
+                        <span>{formatPosition(archivePlayback.duration)}</span>
+                      </div>
+                      <div className="archive-bar-buttons">
+                        <button onClick={() => seekArchive(archivePos - 300)}>−5 min</button>
+                        <button onClick={() => seekArchive(archivePos - 30)}>−30 s</button>
+                        <button onClick={() => seekArchive(archivePos + 30)}>+30 s</button>
+                        <button onClick={() => seekArchive(archivePos + 300)}>+5 min</button>
+                        <button onClick={() => startDownload(archivePlayback.streamUrl)}>⬇ Download</button>
+                        <button onClick={() => playChannel(archivePlayback.channel)}>🔴 Live</button>
+                      </div>
+                    </div>
+                  )}
                   <div className="now-playing-bar">
                     <div className="now-playing-info">
                       <img
@@ -710,6 +1032,9 @@
                       </div>
                     </div>
                     <div className="player-controls">
+                      {currentChannel.archive && (
+                        <button onClick={() => openArchive(currentChannel)}>⏪ Archive</button>
+                      )}
                       <button onClick={toggleFullscreen}>
                         {isFullscreen ? '⬜ Exit Fullscreen' : '⬜ Fullscreen'}
                       </button>
@@ -726,6 +1051,72 @@
             </div>
           </div>
           
+          {/* Archive Modal */}
+          {archiveChannel && (
+            <div className="modal-overlay" onClick={() => setArchiveChannel(null)}>
+              <div className="modal archive-modal" onClick={e => e.stopPropagation()}>
+                <h2>⏪ {archiveChannel.name}</h2>
+                
+                <div className="archive-days">
+                  {getArchiveDays(archiveChannel).map(day => (
+                    <button
+                      key={day.date}
+                      type="button"
+                      className={`theme-option ${archiveDate === day.date ? 'active' : ''}`}
+                      onClick={() => loadArchiveDay(archiveChannel, day.date)}
+                    >
+                      {day.label}
+                    </button>
+                  ))}
+                </div>
+                
+                {archiveError && <div className="error-msg">{archiveError}</div>}
+                
+                <div className="archive-programs">
+                  {archiveLoading && <div className="archive-empty">Loading programme guide...</div>}
+                  {!archiveLoading && archivePrograms.length === 0 && !archiveError && (
+                    <div className="archive-empty">No programme guide for this day.</div>
+                  )}
+                  {archivePrograms.map(program => {
+                    const started = program.start <= Date.now() / 1000;
+                    const available = program.archive && started;
+                    return (
+                      <div key={program.id} className={`archive-row ${available ? '' : 'unavailable'}`} title={program.descr}>
+                        <span className="archive-time">{clockTime(program.start)} – {clockTime(program.stop)}</span>
+                        <span className="archive-name">{program.name}</span>
+                        {available && (
+                          <span className="archive-actions">
+                            <button type="button" title="Play" onClick={() => playArchiveProgram(program)}>▶</button>
+                            <button type="button" title="Download" onClick={() => downloadArchiveProgram(program)}>⬇</button>
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                
+                <div className="archive-interval">
+                  <label>Download an interval of this day</label>
+                  <div className="archive-interval-row">
+                    <input type="time" value={intervalFrom} onChange={(e) => setIntervalFrom(e.target.value)} />
+                    <span>to</span>
+                    <input type="time" value={intervalTo} onChange={(e) => setIntervalTo(e.target.value)} />
+                    <button type="button" className="btn btn-secondary" onClick={downloadArchiveInterval}>⬇ Download</button>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setArchiveChannel(null)}
+                  style={{marginTop: 'var(--space-md)'}}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Preferences Modal */}
           {showPreferences && (
             <div className="modal-overlay" onClick={() => setShowPreferences(false)}>

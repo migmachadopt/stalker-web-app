@@ -11,6 +11,7 @@ const userService = require('./services/userService');
 const iptvService = require('./services/iptvService');
 const streamService = require('./services/streamService');
 const channelListService = require('./services/channelListService');
+const archiveService = require('./services/archiveService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -18,6 +19,12 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+// Any request that carries an IPTV session keeps that session alive
+app.use('/api/iptv', (req, res, next) => {
+  if (req.body?.sessionId) iptvService.touchSession(req.body.sessionId);
+  next();
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 🔐 AUTHENTICATION ROUTES
@@ -370,7 +377,7 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
     
     const { sessionId } = await iptvService.connect(user);
     
-    // Start watchdog for session
+    // Start watchdog for session (restarts cleanly when the session is reused)
     iptvService.startWatchdog(sessionId);
     
     res.json({
@@ -392,7 +399,7 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
     const session = iptvService.getSession(sessionId);
     
     if (!session) {
-      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
     }
     
     if (session.userId !== req.user.userId) {
@@ -428,7 +435,7 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
     const session = iptvService.getSession(sessionId);
     
     if (!session) {
-      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
     }
     
     if (session.userId !== req.user.userId) {
@@ -474,6 +481,108 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
   }
 });
 
+// Programme guide of one channel for one day (used by the archive browser)
+app.post('/api/iptv/epg', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, channelId, date } = req.body;
+    
+    const session = iptvService.getSession(sessionId);
+    
+    if (!session) {
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
+    }
+    
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
+    }
+    
+    const user = userService.findUserById(req.user.userId);
+    const channel = user && channelListService.findVisibleChannel(user, channelId);
+    
+    if (!channel) {
+      return res.status(403).json({ success: false, error: 'Channel not available' });
+    }
+    
+    const programs = await archiveService.getEpg(sessionId, user.id, channel.id, date);
+    
+    res.json({
+      success: true,
+      channelId: channel.id,
+      date,
+      archive: !!channel.archive,
+      archiveHours: channel.archiveHours || 0,
+      programs
+    });
+    
+  } catch (error) {
+    logger.error('iptv', 'EPG fetch error', { error: error.message });
+    res.status(error.message === 'Invalid date' ? 400 : 500).json({ success: false, error: 'Failed to fetch programme guide' });
+  }
+});
+
+// Archive (catch-up) stream for a programme or a custom interval of a channel
+app.post('/api/iptv/archive/stream', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, channelId, date, programId, start, duration, title } = req.body;
+    
+    const session = iptvService.getSession(sessionId);
+    
+    if (!session) {
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
+    }
+    
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
+    }
+    
+    const user = userService.findUserById(req.user.userId);
+    const channel = user && channelListService.findVisibleChannel(user, channelId);
+    
+    if (!channel) {
+      return res.status(403).json({ success: false, error: 'Channel not available' });
+    }
+    
+    const request = { date, programId, start, duration };
+    let window;
+    
+    try {
+      window = await archiveService.createWindowLink(sessionId, user.id, channel, request);
+    } catch (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+    
+    const safeTitle = String(title || 'archive').replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+    
+    const streamToken = streamService.generateStreamToken(
+      req.user.userId,
+      window.url,
+      { id: channel.id, name: channel.name, type: 'ARCHIVE' },
+      session.username,
+      {
+        duration: window.duration,
+        filename: `${channel.name} - ${safeTitle}.ts`,
+        relink: async () => (await archiveService.createWindowLink(sessionId, user.id, channel, request)).url
+      }
+    );
+    
+    logger.logUserActivity(session.username, 'requesting archive', {
+      channel: channel.name,
+      minutes: Math.round(window.duration / 60)
+    });
+    
+    res.json({
+      success: true,
+      streamUrl: `/api/stream/${streamToken}`,
+      start: window.start,
+      duration: window.duration
+    });
+    
+  } catch (error) {
+    logger.error('stream', 'Archive request error', { error: error.message });
+    res.status(500).json({ success: false, error: 'Failed to get archive stream' });
+  }
+});
+
 app.post('/api/iptv/watchdog', authMiddleware, async (req, res) => {
   try {
     const { sessionId } = req.body;
@@ -481,7 +590,7 @@ app.post('/api/iptv/watchdog', authMiddleware, async (req, res) => {
     const session = iptvService.getSession(sessionId);
     
     if (!session) {
-      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
     }
     
     if (session.userId !== req.user.userId) {

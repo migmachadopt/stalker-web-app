@@ -14,7 +14,7 @@ class IPTVService {
     this.watchdogIntervals = new Map();
     
     // Cleanup old sessions periodically
-    setInterval(() => this.cleanupSessions(), 5 * 60 * 1000);
+    setInterval(() => this.cleanupSessions(), 60 * 1000);
   }
 
   getStalkerHeaders(token = '', macAddress = '') {
@@ -151,6 +151,19 @@ class IPTVService {
       throw new Error('Portal URL and MAC address not configured');
     }
 
+    // One portal session per user, like a single set-top box: every tab and
+    // device of that user shares it instead of competing with new handshakes
+    const existingId = this.findSessionIdByUserId(user.id);
+    if (existingId) {
+      const existing = this.sessions.get(existingId);
+      if (existing.configuredPortal === user.portalUrl && existing.macAddress === user.macAddress) {
+        existing.lastUsed = Date.now();
+        logger.info('iptv', `${user.username} - Reusing portal session`, { sessionId: existingId.substring(0, 8) });
+        return { sessionId: existingId, session: existing };
+      }
+      this.destroySession(existingId);
+    }
+
     logger.logIPTVConnection(user.username, user.portalUrl, 'connecting');
 
     // Clean base URL
@@ -203,11 +216,13 @@ class IPTVService {
       baseUrl,
       portalUrl: discovery.fullUrl,
       portalPath: discovery.path,
+      configuredPortal: user.portalUrl,
       macAddress: user.macAddress,
       token: discovery.token,
       userId: user.id,
       username: user.username,
       createdAt: Date.now(),
+      lastUsed: Date.now(),
     };
     
     this.sessions.set(sessionId, session);
@@ -222,6 +237,71 @@ class IPTVService {
 
   getSession(sessionId) {
     return this.sessions.get(sessionId);
+  }
+
+  // Called for every client request, so idle sessions can be told apart
+  touchSession(sessionId) {
+    const session = this.sessions.get(sessionId);
+    if (session) session.lastUsed = Date.now();
+  }
+
+  // The portal drops a token after a while; a set-top box then simply
+  // handshakes again. Do the same and keep the session id the client holds.
+  async reauthorize(sessionId) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+
+    if (!session.reauthorizing) {
+      session.reauthorizing = (async () => {
+        const handshake = await axios.get(
+          `${session.portalUrl}?type=stb&action=handshake&token=&JsHttpRequest=1-xml`,
+          { headers: this.getStalkerHeaders('', session.macAddress), timeout: 10000 }
+        );
+
+        const token = handshake.data?.js?.token;
+        if (!token) throw new Error('Portal refused a new handshake');
+
+        session.token = token;
+
+        await axios.get(
+          `${session.portalUrl}?type=stb&action=get_profile&JsHttpRequest=1-xml`,
+          { headers: this.getStalkerHeaders(session.token, session.macAddress), timeout: 15000 }
+        );
+
+        logger.info('iptv', `${session.username} - Portal session renewed`, { sessionId: sessionId.substring(0, 8) });
+      })().finally(() => { session.reauthorizing = null; });
+    }
+
+    return session.reauthorizing;
+  }
+
+  // Ask the portal for a link; when it returns none the token was dropped,
+  // so renew the session and ask once more
+  async requestLink(sessionId, query) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+
+    const ask = async () => {
+      const response = await axios.get(
+        `${session.portalUrl}?${query}&JsHttpRequest=1-xml`,
+        {
+          headers: this.getStalkerHeaders(session.token, session.macAddress),
+          timeout: 15000
+        }
+      );
+      const link = response.data?.js?.cmd;
+      return typeof link === 'string' && link ? link : null;
+    };
+
+    let link = await ask();
+
+    if (!link) {
+      logger.warn('iptv', `${session.username} - Portal returned no link, renewing session`);
+      await this.reauthorize(sessionId);
+      link = await ask();
+    }
+
+    return link;
   }
 
   findSessionIdByUserId(userId) {
@@ -375,6 +455,8 @@ class IPTVService {
         tv_genre_id: ch.tv_genre_id,
         genres_str: ch.genres_str || '',
         hd: ch.hd === "1" || ch.hd === 1,
+        archive: Number(ch.enable_tv_archive) === 1 || Number(ch.archive) === 1,
+        archiveHours: Number(ch.tv_archive_duration) || 0,
       }))
     };
   }
@@ -385,17 +467,12 @@ class IPTVService {
 
     logger.logUserActivity(session.username, 'requesting stream', { channel: channelName });
 
-    const response = await axios.get(
-      `${session.portalUrl}?type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&JsHttpRequest=1-xml`,
-      { 
-        headers: this.getStalkerHeaders(session.token, session.macAddress), 
-        timeout: 15000 
-      }
+    let streamUrl = await this.requestLink(
+      sessionId,
+      `type=itv&action=create_link&cmd=${encodeURIComponent(cmd)}&series=`
     );
 
-    let streamUrl = response.data?.js?.cmd || response.data?.js || '';
-
-    if (typeof streamUrl !== 'string' || !streamUrl) {
+    if (!streamUrl) {
       throw new Error('Portal did not return a stream link');
     }
 
@@ -420,6 +497,73 @@ class IPTVService {
       channelId,
       channelName
     };
+  }
+
+  // Programme guide of one channel for one day, all pages
+  async getEpgDay(sessionId, channelId, date) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+
+    const fetchPage = async (page) => {
+      const response = await axios.get(
+        `${session.portalUrl}?type=epg&action=get_simple_data_table&ch_id=${encodeURIComponent(channelId)}&date=${date}&p=${page}&JsHttpRequest=1-xml`,
+        {
+          headers: this.getStalkerHeaders(session.token, session.macAddress),
+          timeout: 15000
+        }
+      );
+      return response.data?.js || {};
+    };
+
+    let first = await fetchPage(1);
+
+    if (!Array.isArray(first.data)) {
+      await this.reauthorize(sessionId);
+      first = await fetchPage(1);
+    }
+
+    let items = first.data || [];
+
+    const total = Number(first.total_items) || 0;
+    const pageSize = Number(first.max_page_items) || items.length || 1;
+    const pages = Math.min(Math.ceil(total / pageSize), 30);
+
+    if (pages > 1) {
+      const rest = await Promise.all(
+        Array.from({ length: pages - 1 }, (_, i) => fetchPage(i + 2))
+      );
+      rest.forEach(page => { items = items.concat(page.data || []); });
+    }
+
+    return items
+      .map(item => ({
+        id: item.id,
+        name: item.name || '',
+        descr: item.descr || '',
+        start: Number(item.start_timestamp),
+        stop: Number(item.stop_timestamp),
+        archive: Number(item.mark_archive) === 1
+      }))
+      .filter(item => item.start && item.stop > item.start)
+      .sort((a, b) => a.start - b.start);
+  }
+
+  // Provider link for an archived programme (EPG item id)
+  async createArchiveLink(sessionId, programId) {
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error('Invalid session');
+
+    const cmd = `auto /media/${programId}.mpg`;
+    const link = await this.requestLink(
+      sessionId,
+      `type=tv_archive&action=create_link&cmd=${encodeURIComponent(cmd)}&series=&forced_storage=&disable_ad=0&download=0`
+    );
+
+    if (!link) {
+      throw new Error('Portal did not return an archive link');
+    }
+
+    return link.replace(/^(ffmpeg|auto)\s+/i, '').trim();
   }
 
   async watchdog(sessionId) {
@@ -482,10 +626,14 @@ class IPTVService {
     const MAX_SESSION_AGE = 24 * 60 * 60 * 1000; // 24 hours
     
     for (const [sessionId, session] of this.sessions.entries()) {
-      if (now - session.createdAt > MAX_SESSION_AGE) {
-        logger.info('iptv', `Cleaning up old session`, { 
+      const idle = now - (session.lastUsed || session.createdAt);
+      
+      // Open players ping every minute; a silent session has no client left
+      if (now - session.createdAt > MAX_SESSION_AGE || idle > config.SESSION_IDLE_TIMEOUT) {
+        logger.info('iptv', `Cleaning up session`, { 
           username: session.username,
-          age: Math.floor((now - session.createdAt) / 1000 / 60) + ' minutes'
+          age: Math.floor((now - session.createdAt) / 1000 / 60) + ' minutes',
+          idle: Math.floor(idle / 1000 / 60) + ' minutes'
         });
         this.destroySession(sessionId);
       }
