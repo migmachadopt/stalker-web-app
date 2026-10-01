@@ -23,9 +23,7 @@
     const { useState, useEffect, useRef } = React;
     
     // Backend origin used for stream proxy (API_URL comes from api.js)
-    const BACKEND_ORIGIN = (window.API_URL || 'http://localhost:3001/api')
-      .replace(/\/+$/, '')
-      .replace(/\/api$/, '');
+    const BACKEND_ORIGIN = new URL(API_URL, window.location.href).origin;
 
     function App() {
       // Auth state

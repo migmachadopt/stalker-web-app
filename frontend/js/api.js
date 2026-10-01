@@ -2,7 +2,11 @@
 // 🌐 API Communication Module
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const API_URL = window.API_URL || 'http://localhost:3001/api';
+const API_URL = window.API_URL || (
+  window.location.protocol === 'file:' || ['localhost', '127.0.0.1'].includes(window.location.hostname)
+    ? 'http://localhost:3001/api'
+    : '/api'
+);
 
 const api = {
   token: localStorage.getItem('authToken'),
