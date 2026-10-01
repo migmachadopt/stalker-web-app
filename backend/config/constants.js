@@ -20,7 +20,10 @@ module.exports = {
   // Data Paths
   DATA_DIR: require('path').join(__dirname, '..', 'data'),
   USERS_FILE: require('path').join(__dirname, '..', 'data', 'users.enc'),
-  
+
+  // Channel list cache
+  CHANNEL_LIST_MAX_AGE: 24 * 60 * 60 * 1000, // 24 hours
+
   // IPTV
   STALKER_HEADERS: {
     'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2738 Mobile Safari/533.3',

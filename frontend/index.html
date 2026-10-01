@@ -46,7 +46,10 @@
       const [iptvSessionId, setIptvSessionId] = useState('');
       const [channels, setChannels] = useState([]);
       const [genres, setGenres] = useState([]);
-      const [genresMap, setGenresMap] = useState({});
+      const [listUpdatedAt, setListUpdatedAt] = useState(null);
+      const [hiddenGroups, setHiddenGroups] = useState(0);
+      const [isRefreshing, setIsRefreshing] = useState(false);
+      const [listError, setListError] = useState('');
       const [selectedGenre, setSelectedGenre] = useState(null);
       const [showChannels, setShowChannels] = useState(false);
       const [searchTerm, setSearchTerm] = useState('');
@@ -207,7 +210,8 @@
         setIptvSessionId(''); 
         setChannels([]); 
         setGenres([]);
-        setGenresMap({});  // 🐛 FIX: Reset genresMap to fix "map is not defined" error
+        setListUpdatedAt(null);
+        setHiddenGroups(0);
         setSelectedGenre(null);
         setShowChannels(false);
         setSearchTerm('');
@@ -263,59 +267,9 @@
           const sessionId = connectData.sessionId;
           setIptvSessionId(sessionId);
           
-          // Load genres
-          setLoadingProgress('Loading genres...');
-          const genresData = await api.iptvGetGenres(sessionId, 'itv');
-          
-          let localGenresMap = {};
-          if (genresData.success) {
-            // Create genres map
-            const map = {};
-            genresData.genres.forEach(g => {
-              map[g.id] = {
-                name: g.title,
-                icon: utils?.getIconForGenre?.(g.title) || '📁',
-                number: g.number
-              };
-            });
-            localGenresMap = map;
-            setGenresMap(map);
-          }
-          
-          // Load channels
+          // Load channel list (stored on the server, re-read from the portal once a day)
           setLoadingProgress('Loading channels...');
-          const chData = await api.iptvGetChannels(sessionId);
-          
-          if (!chData.success) {
-            throw new Error(chData.error || 'Failed to load channels');
-          }
-          
-          setChannels(chData.channels);
-          
-          // Process genres from channels
-          const genreMap = {};
-          chData.channels.forEach(ch => { 
-            const gid = ch.tv_genre_id || 0; 
-            if (!genreMap[gid]) {
-              const info = localGenresMap[gid] || { name: `Group ${gid}`, icon: '📁', number: Number.MAX_SAFE_INTEGER }; 
-              genreMap[gid] = { 
-                id: gid, 
-                name: info.name, 
-                icon: info.icon, 
-                number: info.number ?? Number.MAX_SAFE_INTEGER,
-                count: 0 
-              }; 
-            } 
-            genreMap[gid].count++; 
-          });
-          
-          setGenres(
-            Object.values(genreMap)
-              .sort((a, b) => {
-                if (a.number !== b.number) return a.number - b.number;
-                return a.name.localeCompare(b.name);
-              })
-          );
+          await loadChannelList(sessionId, false);
           
           // Start watchdog
           startWatchdog(sessionId);
@@ -324,6 +278,51 @@
         } catch (err) { 
           setError(err.message); 
           setScreen('noconfig'); 
+        }
+      };
+
+      const loadChannelList = async (sessionId, refresh) => {
+        const chData = await api.iptvGetChannels(sessionId, refresh);
+        
+        if (!chData.success) {
+          throw new Error(chData.error || 'Failed to load channels');
+        }
+        
+        setChannels(chData.channels);
+        setGenres(
+          chData.genres
+            .map(g => ({
+              id: g.id,
+              name: g.title,
+              icon: utils?.getIconForGenre?.(g.title) || '📁',
+              number: g.number ?? Number.MAX_SAFE_INTEGER,
+              count: g.count
+            }))
+            .sort((a, b) => {
+              if (a.number !== b.number) return a.number - b.number;
+              return a.name.localeCompare(b.name);
+            })
+        );
+        setListUpdatedAt(chData.updatedAt);
+        setHiddenGroups(chData.hiddenGroups || 0);
+      };
+
+      const handleRefreshChannels = async () => {
+        if (isRefreshing) return;
+        
+        setIsRefreshing(true);
+        setListError('');
+        
+        try {
+          await loadChannelList(iptvSessionId, true);
+          
+          // The selected group may have been removed or hidden meanwhile
+          setShowChannels(false);
+          setSearchTerm('');
+        } catch (err) {
+          setListError(err.message);
+        } finally {
+          setIsRefreshing(false);
         }
       };
 
@@ -381,12 +380,7 @@
         setCurrentChannel(channel);
         
         try {
-          const data = await api.iptvGetStream(
-            iptvSessionId,
-            channel.id,
-            channel.cmd,
-            channel.name
-          );
+          const data = await api.iptvGetStream(iptvSessionId, channel.id);
           
           if (data.success && data.streamUrl) {
             loadStream(data.streamUrl, data.streamType);
@@ -583,6 +577,16 @@
                   </button>
                   <h2>TV Channels</h2>
                 </div>
+                <button
+                  className="collapse-btn"
+                  onClick={handleRefreshChannels}
+                  disabled={isRefreshing}
+                  title={listUpdatedAt
+                    ? `Refresh channel list (last updated ${new Date(listUpdatedAt).toLocaleString()})`
+                    : 'Refresh channel list'}
+                >
+                  {isRefreshing ? '⏳' : '🔄'}
+                </button>
               </div>
               <div className="search-container">
                 <span className="search-icon">🔍</span>
@@ -601,6 +605,17 @@
                 {/* Genres Panel */}
                 <div className="slide-panel">
                   <div className="groups-panel">
+                    {listError && <div className="error-msg">{listError}</div>}
+                    {genres.length === 0 && (
+                      <div className="groups-empty">
+                        <p>No channel groups are enabled for your account.</p>
+                        <p>
+                          {user?.role === 'admin'
+                            ? 'Open the Admin Panel (⚙️) and choose which groups to show.'
+                            : 'Contact the administrator to enable them.'}
+                        </p>
+                      </div>
+                    )}
                     {filteredGenres.map(genre => (
                       <div 
                         key={genre.id} 

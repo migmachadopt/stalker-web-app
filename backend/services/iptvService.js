@@ -192,6 +192,13 @@ class IPTVService {
     return this.sessions.get(sessionId);
   }
 
+  findSessionIdByUserId(userId) {
+    for (const [sessionId, session] of this.sessions.entries()) {
+      if (session.userId === userId) return sessionId;
+    }
+    return null;
+  }
+
   // 🐛 FIX: Corrigido método getGenres
   async getGenres(sessionId, type = 'itv') {
     const session = this.getSession(sessionId);

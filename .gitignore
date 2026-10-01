@@ -138,3 +138,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 backend/data/users.enc
+
+# Cached channel lists
+backend/data/channels-*.enc

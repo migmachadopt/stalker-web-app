@@ -564,6 +564,18 @@ body {
   padding: 8px;
 }
 
+.groups-empty {
+  padding: 24px 12px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.groups-empty p + p {
+  margin-top: 8px;
+}
+
 .group-item {
   display: flex;
   align-items: center;

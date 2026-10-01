@@ -99,6 +99,22 @@
     /* Checkbox */
     .checkbox-group { display: flex; align-items: center; gap: 10px; }
     .checkbox-group input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; }
+    
+    /* Channel groups */
+    .groups-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+    .groups-toolbar .meta { color: #888; font-size: 0.85rem; }
+    .groups-toolbar .links { display: flex; gap: 8px; }
+    .groups-toolbar button { background: #2a2a3e; border: none; color: #ccc; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+    .groups-toolbar button:hover { background: #3a3a4e; color: #fff; }
+    .groups-toolbar button:disabled { opacity: 0.5; cursor: wait; }
+    .groups-list { max-height: 50vh; overflow-y: auto; border: 1px solid #2a2a3e; border-radius: 8px; }
+    .groups-list label { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #2a2a3e; cursor: pointer; }
+    .groups-list label:last-child { border-bottom: none; }
+    .groups-list label:hover { background: #252538; }
+    .groups-list input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+    .groups-list .title { flex: 1; }
+    .groups-list .count { color: #888; font-size: 0.85rem; }
+    .groups-empty { color: #888; padding: 20px; text-align: center; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -139,6 +155,13 @@
         macAddress: '',
         isActive: true
       });
+
+      // Channel groups modal
+      const [groupsUser, setGroupsUser] = useState(null);
+      const [groups, setGroups] = useState([]);
+      const [groupsUpdatedAt, setGroupsUpdatedAt] = useState(null);
+      const [groupsBusy, setGroupsBusy] = useState(false);
+      const [groupsError, setGroupsError] = useState('');
 
       useEffect(() => {
         checkAuth();
@@ -247,6 +270,88 @@
         }
       };
 
+      const sortGroups = (list) => [...list].sort((a, b) => {
+        const an = a.number ?? Number.MAX_SAFE_INTEGER;
+        const bn = b.number ?? Number.MAX_SAFE_INTEGER;
+        if (an !== bn) return an - bn;
+        return a.title.localeCompare(b.title);
+      });
+
+      const applyGroupsResponse = (data) => {
+        setGroups(sortGroups(data.groups));
+        setGroupsUpdatedAt(data.updatedAt);
+      };
+
+      const openGroupsModal = async (u) => {
+        setGroupsUser(u);
+        setGroups([]);
+        setGroupsUpdatedAt(null);
+        setGroupsError('');
+        setGroupsBusy(true);
+        
+        try {
+          const data = await api.fetch(`/admin/users/${u.id}/groups`);
+          if (data.success) applyGroupsResponse(data);
+          else setGroupsError(data.error);
+        } catch (err) {
+          setGroupsError('An error occurred');
+        } finally {
+          setGroupsBusy(false);
+        }
+      };
+
+      const refreshGroups = async () => {
+        setGroupsError('');
+        setGroupsBusy(true);
+        
+        try {
+          const data = await api.fetch(`/admin/users/${groupsUser.id}/groups/refresh`, { method: 'POST' });
+          if (data.success) {
+            // Keep unsaved ticks; groups that are new stay unticked
+            const ticked = new Set(groups.filter(g => g.enabled).map(g => g.id));
+            const known = new Set(groups.map(g => g.id));
+            applyGroupsResponse({
+              ...data,
+              groups: data.groups.map(g => known.has(g.id) ? { ...g, enabled: ticked.has(g.id) } : g)
+            });
+          } else {
+            setGroupsError(data.error);
+          }
+        } catch (err) {
+          setGroupsError('An error occurred');
+        } finally {
+          setGroupsBusy(false);
+        }
+      };
+
+      const setAllGroups = (enabled) => setGroups(groups.map(g => ({ ...g, enabled })));
+
+      const toggleGroup = (id) => setGroups(groups.map(g => g.id === id ? { ...g, enabled: !g.enabled } : g));
+
+      const saveGroups = async () => {
+        setGroupsError('');
+        setGroupsBusy(true);
+        
+        try {
+          const data = await api.fetch(`/admin/users/${groupsUser.id}/groups`, {
+            method: 'PUT',
+            body: JSON.stringify({ enabledGenres: groups.filter(g => g.enabled).map(g => g.id) })
+          });
+          
+          if (data.success) {
+            setSuccess(`Channel groups updated for ${groupsUser.username}!`);
+            setGroupsUser(null);
+            setTimeout(() => setSuccess(''), 3000);
+          } else {
+            setGroupsError(data.error);
+          }
+        } catch (err) {
+          setGroupsError('An error occurred');
+        } finally {
+          setGroupsBusy(false);
+        }
+      };
+
       if (loading) {
         return <div className="loading"><div className="spinner"></div>Loading...</div>;
       }
@@ -344,6 +449,7 @@
                       <td>
                         <div className="actions">
                           <button onClick={() => openEditModal(u.id)}>✏️ Edit</button>
+                          <button onClick={() => openGroupsModal(u)}>📂 Groups</button>
                           <button onClick={() => handleToggleActive(u.id, u.isActive)}>
                             {u.isActive ? '🚫 Disable' : '✅ Enable'}
                           </button>
@@ -356,6 +462,56 @@
               </table>
             </div>
           </main>
+          
+          {groupsUser && (
+            <div className="modal-overlay" onClick={() => setGroupsUser(null)}>
+              <div className="modal" onClick={e => e.stopPropagation()}>
+                <h2>📂 Channel Groups — {groupsUser.username}</h2>
+                
+                {groupsError && <div className="error-msg">{groupsError}</div>}
+                
+                <div className="groups-toolbar">
+                  <span className="meta">
+                    {groupsUpdatedAt
+                      ? `List updated ${new Date(groupsUpdatedAt).toLocaleString()} · ${groups.filter(g => g.enabled).length}/${groups.length} shown`
+                      : 'No channel list stored yet'}
+                  </span>
+                  <div className="links">
+                    <button type="button" onClick={() => setAllGroups(true)} disabled={groupsBusy || groups.length === 0}>All</button>
+                    <button type="button" onClick={() => setAllGroups(false)} disabled={groupsBusy || groups.length === 0}>None</button>
+                    <button type="button" onClick={refreshGroups} disabled={groupsBusy || !groupsUser.hasPortalConfig}>
+                      {groupsBusy ? '⏳' : '🔄'} Refresh
+                    </button>
+                  </div>
+                </div>
+                
+                {groups.length > 0 ? (
+                  <div className="groups-list">
+                    {groups.map(g => (
+                      <label key={g.id}>
+                        <input type="checkbox" checked={g.enabled} onChange={() => toggleGroup(g.id)} />
+                        <span className="title">{g.title}</span>
+                        <span className="count">{g.count} channels</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="groups-empty">
+                    {groupsBusy
+                      ? 'Loading...'
+                      : groupsUser.hasPortalConfig
+                        ? 'The list is stored when the user signs in. Press Refresh to read it from the portal now.'
+                        : 'This user has no portal URL / MAC address configured yet.'}
+                  </div>
+                )}
+                
+                <div className="modal-actions">
+                  <button type="button" className="btn btn-secondary" onClick={() => setGroupsUser(null)}>Cancel</button>
+                  <button type="button" className="btn btn-primary" onClick={saveGroups} disabled={groupsBusy || groups.length === 0}>Save</button>
+                </div>
+              </div>
+            </div>
+          )}
           
           {showModal && (
             <div className="modal-overlay" onClick={() => setShowModal(false)}>

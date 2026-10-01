@@ -112,6 +112,7 @@ class UserService {
       role: userData.role || 'user',
       portalUrl: userData.portalUrl || '',
       macAddress: userData.macAddress || '',
+      enabledGenres: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       lastLogin: null,
@@ -147,7 +148,8 @@ class UserService {
     if (updates.portalUrl !== undefined) user.portalUrl = updates.portalUrl;
     if (updates.macAddress !== undefined) user.macAddress = updates.macAddress;
     if (updates.isActive !== undefined) user.isActive = updates.isActive;
-    
+    if (Array.isArray(updates.enabledGenres)) user.enabledGenres = updates.enabledGenres.map(String);
+
     user.updatedAt = new Date().toISOString();
     
     this.saveUsers(data);

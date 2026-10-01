@@ -10,6 +10,7 @@ const encryption = require('./services/encryption');
 const userService = require('./services/userService');
 const iptvService = require('./services/iptvService');
 const streamService = require('./services/streamService');
+const channelListService = require('./services/channelListService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -209,8 +210,15 @@ app.put('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
       return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
     }
     
+    // A different portal/MAC means the stored channel list no longer applies
+    const portalChanged = updates.portalUrl !== undefined && updates.portalUrl !== user.portalUrl;
+    const macChanged = updates.macAddress !== undefined && updates.macAddress !== user.macAddress;
+    if (portalChanged) updates.enabledGenres = [];
+
     const updatedUser = userService.updateUser(id, updates);
-    
+
+    if (portalChanged || macChanged) channelListService.remove(id);
+
     logger.logUserActivity('admin', `updated user ${updatedUser.username}`);
     
     res.json({
@@ -251,7 +259,8 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
     }
     
     userService.deleteUser(id);
-    
+    channelListService.remove(id);
+
     logger.logUserActivity('admin', `deleted user ${user.username}`);
     
     res.json({ success: true, message: 'User deleted successfully' });
@@ -290,6 +299,63 @@ app.get('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
   }
 });
 
+// Channel groups visible to a user (groups are hidden until enabled here)
+app.get('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const user = userService.findUserById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    res.json({ success: true, ...channelListService.getGroups(user) });
+
+  } catch (error) {
+    res.status(500).json({ success: false, error: 'Failed to get channel groups' });
+  }
+});
+
+app.put('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const { enabledGenres } = req.body;
+
+    if (!Array.isArray(enabledGenres)) {
+      return res.status(400).json({ success: false, error: 'enabledGenres must be an array' });
+    }
+
+    const updatedUser = userService.updateUser(req.params.id, { enabledGenres });
+
+    logger.logUserActivity('admin', `updated channel groups of ${updatedUser.username}`, {
+      enabled: updatedUser.enabledGenres.length
+    });
+
+    res.json({ success: true, ...channelListService.getGroups(updatedUser) });
+
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/admin/users/:id/groups/refresh', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const user = userService.findUserById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    await channelListService.refreshForUser(user);
+
+    logger.logUserActivity('admin', `refreshed channel list of ${user.username}`);
+
+    res.json({ success: true, ...channelListService.getGroups(user) });
+
+  } catch (error) {
+    logger.error('iptv', 'Admin channel list refresh error', { error: error.message });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📺 IPTV ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -319,37 +385,9 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/iptv/genres', authMiddleware, async (req, res) => {
-  try {
-    const { sessionId, type } = req.body;
-    
-    const session = iptvService.getSession(sessionId);
-    
-    if (!session) {
-      return res.status(401).json({ success: false, error: 'Invalid IPTV session' });
-    }
-    
-    if (session.userId !== req.user.userId) {
-      return res.status(403).json({ success: false, error: 'Session access denied' });
-    }
-    
-    const genres = await iptvService.getGenres(sessionId, type || 'itv');
-    
-    res.json({
-      success: true,
-      type: type || 'itv',
-      genres
-    });
-    
-  } catch (error) {
-    logger.error('iptv', 'Genres fetch error', { error: error.message });
-    res.status(500).json({ success: false, error: 'Failed to fetch genres' });
-  }
-});
-
 app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
   try {
-    const { sessionId } = req.body;
+    const { sessionId, refresh } = req.body;
     
     const session = iptvService.getSession(sessionId);
     
@@ -361,11 +399,20 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Session access denied' });
     }
     
-    const result = await iptvService.getChannels(sessionId);
+    const user = userService.findUserById(req.user.userId);
+    
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+    
+    // Stored list is reused; the portal is only read when it is older than 24h or on demand
+    const { list, fromCache } = await channelListService.getList(sessionId, user.id, refresh === true);
     
     res.json({
       success: true,
-      ...result
+      updatedAt: list.updatedAt,
+      fromCache,
+      ...channelListService.getVisible(user, list)
     });
     
   } catch (error) {
@@ -376,7 +423,7 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
 
 app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
   try {
-    const { sessionId, channelId, cmd, channelName } = req.body;
+    const { sessionId, channelId } = req.body;
     
     const session = iptvService.getSession(sessionId);
     
@@ -388,7 +435,16 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       return res.status(403).json({ success: false, error: 'Session access denied' });
     }
     
-    const streamInfo = await iptvService.createStreamLink(sessionId, channelId, cmd, channelName);
+    // Only channels from groups enabled for this user can be played
+    const user = userService.findUserById(req.user.userId);
+    const channel = user && channelListService.findVisibleChannel(user, channelId);
+    
+    if (!channel) {
+      return res.status(403).json({ success: false, error: 'Channel not available' });
+    }
+    
+    const channelName = channel.name;
+    const streamInfo = await iptvService.createStreamLink(sessionId, channel.id, channel.cmd, channelName);
     
     const channelInfo = {
       id: channelId,

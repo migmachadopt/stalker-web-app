@@ -60,24 +60,17 @@ const api = {
     return this.fetch('/iptv/connect', { method: 'POST' });
   },
   
-  async iptvGetGenres(sessionId, type = 'itv') {
-    return this.fetch('/iptv/genres', { 
-      method: 'POST', 
-      body: JSON.stringify({ sessionId, type }) 
-    });
-  },
-  
-  async iptvGetChannels(sessionId) {
+  async iptvGetChannels(sessionId, refresh = false) {
     return this.fetch('/iptv/channels', { 
       method: 'POST', 
-      body: JSON.stringify({ sessionId }) 
+      body: JSON.stringify({ sessionId, refresh }) 
     });
   },
   
-  async iptvGetStream(sessionId, channelId, cmd, channelName) {
+  async iptvGetStream(sessionId, channelId) {
     return this.fetch('/iptv/stream', { 
       method: 'POST', 
-      body: JSON.stringify({ sessionId, channelId, cmd, channelName }) 
+      body: JSON.stringify({ sessionId, channelId }) 
     });
   },
   
