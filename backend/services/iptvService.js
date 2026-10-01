@@ -96,9 +96,31 @@ class IPTVService {
     return null;
   }
 
+  // A redirector (e.g. the address given to STB apps) lands on the portal's
+  // loader page under a sub-path, while the API lives at the root of that host.
+  // Probe the host root first, then the sub-path itself.
+  async discoverPortal(baseUrl, macAddress, username) {
+    const bases = [baseUrl];
+    try {
+      const origin = new URL(baseUrl).origin;
+      if (origin !== baseUrl) bases.unshift(origin);
+    } catch (_) {
+      // keep baseUrl only
+    }
+
+    for (const base of bases) {
+      const discovery = await this.discoverPortalPath(base, macAddress, username);
+      if (discovery) return discovery;
+    }
+
+    return null;
+  }
+
   async resolveBaseUrl(baseUrl, username) {
     try {
+      // Redirectors send non-STB clients elsewhere, so identify as a set-top box
       const response = await axios.get(baseUrl, {
+        headers: this.getStalkerHeaders(),
         maxRedirects: 5,
         timeout: 10000,
         validateStatus: (status) => status < 400
@@ -148,13 +170,13 @@ class IPTVService {
     // Follow redirects and log them
     baseUrl = await this.resolveBaseUrl(baseUrl, user.username);
 
-    let discovery = await this.discoverPortalPath(baseUrl, user.macAddress, user.username);
+    let discovery = await this.discoverPortal(baseUrl, user.macAddress, user.username);
 
     if (!discovery && baseUrl.startsWith('http://')) {
       const httpsBase = baseUrl.replace(/^http:\/\//i, 'https://');
       logger.info('iptv', `${user.username} - Retrying with HTTPS`, { from: baseUrl, to: httpsBase });
       const resolvedHttps = await this.resolveBaseUrl(httpsBase, user.username);
-      discovery = await this.discoverPortalPath(resolvedHttps, user.macAddress, user.username);
+      discovery = await this.discoverPortal(resolvedHttps, user.macAddress, user.username);
       if (discovery) {
         baseUrl = resolvedHttps;
       }
