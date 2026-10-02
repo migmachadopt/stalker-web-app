@@ -165,6 +165,15 @@ class RecordingService {
     return this.view(job);
   }
 
+  // Film or episode this recording is (see metadataService); null unlinks it
+  setMetadata(userId, id, metadata) {
+    const job = this.find(userId, id);
+    if (metadata) job.metadata = metadata;
+    else delete job.metadata;
+    this.save();
+    return this.view(job);
+  }
+
   // ── Downloading ──────────────────────────────────────────────────────────
 
   pump() {

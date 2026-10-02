@@ -10,6 +10,9 @@
 //
 // The root itself must already exist: if it is on a disk that is not mounted,
 // nothing is written to the system card in its place.
+//
+// tmdbKey: key for themoviedb.org, used to read film and episode details for
+// the library (see metadataService). It never leaves the server.
 
 const fs = require('fs');
 const path = require('path');
@@ -28,7 +31,12 @@ class SettingsService {
   }
 
   get() {
-    return { ...this.settings };
+    const { tmdbKey, ...shown } = this.settings;
+    return { ...shown, tmdbKeySet: !!tmdbKey };
+  }
+
+  tmdbKey() {
+    return this.settings.tmdbKey || '';
   }
 
   storageRoot() {
@@ -103,11 +111,15 @@ class SettingsService {
       next.storageRoot = root === config.RECORDINGS_DIR ? undefined : root;
     }
 
+    if (patch.tmdbKey !== undefined) {
+      next.tmdbKey = String(patch.tmdbKey || '').trim() || undefined;
+    }
+
     fs.mkdirSync(path.dirname(FILE), { recursive: true });
     fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
     this.settings = next;
 
-    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot() });
+    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot(), tmdbKey: !!next.tmdbKey });
     return this.get();
   }
 }

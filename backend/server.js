@@ -16,6 +16,7 @@ const vodService = require('./services/vodService');
 const subtitleService = require('./services/subtitleService');
 const recordingService = require('./services/recordingService');
 const settingsService = require('./services/settingsService');
+const metadataService = require('./services/metadataService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -326,12 +327,18 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
   });
 });
 
-app.put('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
+app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const settings = settingsService.update({ storageRoot: req.body.storageRoot });
+    const { storageRoot, tmdbKey } = req.body;
+    
+    // A new key is tried before it is kept
+    if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
+    
+    const settings = settingsService.update({ storageRoot, tmdbKey });
     const folders = settingsService.folders();
     
-    logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
+    if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
+    if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
     
     res.json({ success: true, settings, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root) });
   } catch (error) {
@@ -942,6 +949,25 @@ app.post('/api/recordings/:id/retry', authMiddleware, (req, res) => {
 app.delete('/api/recordings/:id', authMiddleware, (req, res) => {
   try {
     res.json({ success: true, ...recordingService.remove(req.user.userId, req.params.id) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Link a recording to its film or episode (IMDb or TMDB link) and keep its details
+app.put('/api/recordings/:id/metadata', authMiddleware, async (req, res) => {
+  try {
+    recordingService.find(req.user.userId, req.params.id);
+    const metadata = await metadataService.lookup(req.body.link);
+    res.json({ success: true, recording: recordingService.setMetadata(req.user.userId, req.params.id, metadata) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/recordings/:id/metadata', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, recording: recordingService.setMetadata(req.user.userId, req.params.id, null) });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }

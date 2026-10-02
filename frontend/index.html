@@ -92,8 +92,40 @@
       box: <React.Fragment><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" rx="1" /><line x1="10" y1="12" x2="14" y2="12" /></React.Fragment>,
       scissors: <React.Fragment><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></React.Fragment>,
       trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
-      menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>
+      menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>,
+      down: <polyline points="6 9 12 15 18 9" />,
+      link: <React.Fragment><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></React.Fragment>,
+      external: <React.Fragment><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></React.Fragment>
     };
+
+    // Language of the app's texts and of film and episode details read from
+    // outside ('en' or 'pt'); details fall back to the other language when missing
+    const APP_LANGUAGE = 'en';
+
+    function metadataText(metadata) {
+      const text = (metadata && metadata.text) || {};
+      const chosen = text[APP_LANGUAGE] || {};
+      const other = text[APP_LANGUAGE === 'pt' ? 'en' : 'pt'] || {};
+      const pick = (field) => (chosen[field] && chosen[field].length ? chosen[field] : other[field]);
+      return {
+        title: pick('title') || '',
+        showTitle: pick('showTitle') || '',
+        overview: pick('overview') || '',
+        genres: pick('genres') || [],
+        poster: pick('poster') || (metadata && metadata.poster) || '',
+        cast: pick('cast') || ''
+      };
+    }
+
+    // "Dinoster · S1 E24 · In the Clutches of Bex Hunter" or "Film (2024)"
+    function metadataLine(metadata) {
+      const text = metadataText(metadata);
+      if (metadata.kind === 'episode') {
+        const number = metadata.season ? `S${metadata.season} E${metadata.episode}` : '';
+        return [text.showTitle, number, text.title].filter(Boolean).join(' · ');
+      }
+      return `${text.title}${metadata.year ? ` (${metadata.year})` : ''}`;
+    }
 
     function Icon({ name, size = 20, filled = false }) {
       return (
@@ -1795,12 +1827,138 @@
       );
     }
 
+    // Details of a recording in the library: the film or episode it is, read
+    // from IMDb or TMDB through the link the user pastes
+    function LibraryDetails({ job, onChanged }) {
+      const metadata = job.metadata;
+      const [changing, setChanging] = useState(!metadata);
+      const [link, setLink] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+
+      useEffect(() => { if (!metadata) setChanging(true); }, [metadata]);
+
+      const save = async (e) => {
+        e.preventDefault();
+        if (!link.trim()) return;
+        setBusy(true);
+        setError('');
+        try {
+          const result = await api.recordingLink(job.id, link.trim());
+          if (!result.success) throw new Error(result.error || 'Could not read this link');
+          setLink('');
+          setChanging(false);
+          onChanged();
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const unlink = async () => {
+        if (!confirm('Remove the link to this film or episode?')) return;
+        const result = await api.recordingUnlink(job.id);
+        if (!result.success) setError(result.error || 'Could not remove the link');
+        onChanged();
+      };
+
+      const form = (
+        <form className="library-link-form" onSubmit={save}>
+          <div className="library-link-hint">
+            {metadata
+              ? 'Paste another link to replace the details.'
+              : 'Is this a film or a series episode? Paste its link on IMDb or TMDB to see its details here. For a series, use the link of the exact episode.'}
+          </div>
+          <div className="library-link-row">
+            <input
+              type="url"
+              value={link}
+              onChange={(e) => setLink(e.target.value)}
+              placeholder="https://www.imdb.com/title/tt…"
+              spellCheck="false"
+              disabled={busy}
+            />
+            <button type="submit" className="vod-play" disabled={busy || !link.trim()}>
+              <Icon name="link" size={15} /> {busy ? 'Reading…' : 'Link'}
+            </button>
+            {metadata && <button type="button" className="vod-secondary" onClick={() => { setChanging(false); setError(''); }}>Cancel</button>}
+          </div>
+          {error && <div className="library-error">{error}</div>}
+        </form>
+      );
+
+      if (!metadata) return <div className="library-details">{form}</div>;
+
+      const text = metadataText(metadata);
+      const picture = metadata.kind === 'episode' && metadata.image ? metadata.image : text.poster;
+      const facts = [
+        metadata.kind === 'episode' ? 'Episode' : 'Film',
+        metadata.date ? new Date(`${metadata.date}T12:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : metadata.year,
+        metadata.runtime ? `${metadata.runtime} min` : '',
+        metadata.rating ? `★ ${metadata.rating}` : ''
+      ].filter(Boolean);
+
+      return (
+        <div className="library-details">
+          <div className="library-meta">
+            {picture && (
+              <img
+                className={picture === metadata.image ? 'still' : 'poster'}
+                src={picture}
+                alt=""
+                onError={(e) => { e.target.style.display = 'none'; }}
+              />
+            )}
+            <div className="library-meta-text">
+              <div className="library-meta-facts">{facts.join(' · ')}</div>
+              {metadata.kind === 'episode' ? (
+                <React.Fragment>
+                  <h4>{text.showTitle || text.title}</h4>
+                  <div className="library-meta-episode">
+                    {[metadata.season ? `Season ${metadata.season}, episode ${metadata.episode}` : '', text.showTitle ? text.title : ''].filter(Boolean).join(' · ')}
+                  </div>
+                </React.Fragment>
+              ) : (
+                <h4>{text.title}</h4>
+              )}
+              {text.genres.length > 0 && <div className="library-meta-genres">{text.genres.join(', ')}</div>}
+              {text.cast && <div className="library-meta-genres">{text.cast}</div>}
+              <p>
+                {text.overview || (metadata.source === 'imdb'
+                  ? 'IMDb only gives the title, picture and year. With a TMDB key in the admin Settings, the synopsis, series, season and episode are shown too.'
+                  : 'No synopsis available.')}
+              </p>
+              {!changing && (
+                <div className="library-meta-actions">
+                  <a className="vod-secondary" href={metadata.link} target="_blank" rel="noopener noreferrer">
+                    <Icon name="external" size={14} /> {/imdb\.com/.test(metadata.link) ? 'Open on IMDb' : 'Open on TMDB'}
+                  </a>
+                  <button className="vod-secondary" onClick={() => setChanging(true)}><Icon name="link" size={14} /> Change link</button>
+                  <button className="vod-secondary" onClick={unlink}>Remove link</button>
+                </div>
+              )}
+              {!changing && error && <div className="library-error">{error}</div>}
+            </div>
+          </div>
+          {changing && form}
+        </div>
+      );
+    }
+
     function LibraryBrowser() {
       const [data, setData] = useState(null);       // { recordings, ffmpeg, freeBytes }
       const [error, setError] = useState('');
       const [editing, setEditing] = useState(null);
       const [playing, setPlaying] = useState(null); // { title, subtitle, url }
       const videoRef = useRef(null);
+      const [expanded, setExpanded] = useState(() => new Set()); // recordings showing their details
+
+      const toggle = (id) => setExpanded(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id); else next.add(id);
+        return next;
+      });
 
       const refresh = async () => {
         try {
@@ -1915,47 +2073,57 @@
             {groups.map(group => (
               <div key={group.title} className="library-group">
                 <h3>{group.title}</h3>
-                {group.items.map(job => (
-                  <div key={job.id} className={`library-item ${job.state}`}>
-                    <img
-                      src={job.channelLogo || CHANNEL_LOGO_FALLBACK}
-                      alt=""
-                      onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
-                    />
-                    <div className="library-text">
-                      <div className="library-title">{job.title}</div>
-                      <div className="library-sub">{job.channelName} · {describe(job)}</div>
-                      {job.state === 'ready' && job.error && <div className="library-error">{job.error}</div>}
-                      {(job.state === 'downloading' || job.state === 'converting') && (
-                        <div className="library-progress"><span style={{ width: `${job.progress}%` }}></span></div>
-                      )}
+                {group.items.map(job => {
+                  const open = expanded.has(job.id);
+                  const poster = job.metadata && metadataText(job.metadata).poster;
+                  return (
+                  <div key={job.id} className={`library-item ${job.state} ${open ? 'open' : ''}`}>
+                    <div className="library-row" onClick={() => toggle(job.id)}>
+                      <img
+                        className={poster ? 'poster' : ''}
+                        src={poster || job.channelLogo || CHANNEL_LOGO_FALLBACK}
+                        alt=""
+                        onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                      />
+                      <div className="library-text">
+                        <div className="library-title">{job.title}</div>
+                        {job.metadata && <div className="library-linked"><Icon name="link" size={12} /> {metadataLine(job.metadata)}</div>}
+                        <div className="library-sub">{job.channelName} · {describe(job)}</div>
+                        {job.state === 'ready' && job.error && <div className="library-error">{job.error}</div>}
+                        {(job.state === 'downloading' || job.state === 'converting') && (
+                          <div className="library-progress"><span style={{ width: `${job.progress}%` }}></span></div>
+                        )}
+                      </div>
+                      <div className="library-actions" onClick={(e) => e.stopPropagation()}>
+                        {job.state === 'ready' && (
+                          <button className="vod-play" onClick={() => setEditing(job)}><Icon name="scissors" size={15} /> Mark start and end</button>
+                        )}
+                        {job.state === 'done' && (
+                          <React.Fragment>
+                            <button className="vod-play" onClick={() => play(job)}><Icon name="play" size={15} filled /> Play</button>
+                            <button className="library-icon" title="Download the MP4" onClick={() => download(job)}><Icon name="download" size={16} /></button>
+                          </React.Fragment>
+                        )}
+                        {job.state === 'failed' && (
+                          <button className="vod-secondary" onClick={() => act(() => api.recordingRetry(job.id))}>Try again</button>
+                        )}
+                        {(job.state === 'converting' || job.state === 'waiting') && (
+                          <button className="vod-secondary" onClick={() => act(() => api.recordingCancel(job.id))}>Stop</button>
+                        )}
+                        <button
+                          className="library-icon"
+                          title={job.state === 'downloading' || job.state === 'queued' ? 'Cancel' : 'Delete'}
+                          onClick={() => act(() => api.recordingRemove(job.id), `Delete "${job.title}" from the library?`)}
+                        >
+                          <Icon name="trash" size={16} />
+                        </button>
+                      </div>
+                      <span className="library-chevron" title={open ? 'Hide details' : 'Show details'}><Icon name="down" size={18} /></span>
                     </div>
-                    <div className="library-actions">
-                      {job.state === 'ready' && (
-                        <button className="vod-play" onClick={() => setEditing(job)}><Icon name="scissors" size={15} /> Mark start and end</button>
-                      )}
-                      {job.state === 'done' && (
-                        <React.Fragment>
-                          <button className="vod-play" onClick={() => play(job)}><Icon name="play" size={15} filled /> Play</button>
-                          <button className="library-icon" title="Download the MP4" onClick={() => download(job)}><Icon name="download" size={16} /></button>
-                        </React.Fragment>
-                      )}
-                      {job.state === 'failed' && (
-                        <button className="vod-secondary" onClick={() => act(() => api.recordingRetry(job.id))}>Try again</button>
-                      )}
-                      {(job.state === 'converting' || job.state === 'waiting') && (
-                        <button className="vod-secondary" onClick={() => act(() => api.recordingCancel(job.id))}>Stop</button>
-                      )}
-                      <button
-                        className="library-icon"
-                        title={job.state === 'downloading' || job.state === 'queued' ? 'Cancel' : 'Delete'}
-                        onClick={() => act(() => api.recordingRemove(job.id), `Delete "${job.title}" from the library?`)}
-                      >
-                        <Icon name="trash" size={16} />
-                      </button>
-                    </div>
+                    {open && <LibraryDetails job={job} onChanged={refresh} />}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             ))}
           </div>

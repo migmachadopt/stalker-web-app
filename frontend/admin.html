@@ -102,11 +102,13 @@
     
     /* Settings */
     .settings-panel { max-width: 760px; }
+    .settings-panel + .settings-panel { margin-top: 20px; }
     .settings-body { padding: 20px; }
     .settings-body code { background: #2a2a3e; padding: 1px 6px; border-radius: 4px; color: #ccc; }
     .settings-status { margin-bottom: 20px; padding: 12px; border-radius: 8px; font-size: 0.9rem; }
     .settings-status.ok { background: rgba(72, 187, 120, 0.15); color: #48bb78; }
     .settings-status.bad { background: rgba(255, 100, 100, 0.15); color: #ff6464; }
+    .settings-body small a { color: #9aa8ff; }
     .settings-foot { display: block; margin-top: 12px; color: #666; font-size: 0.8rem; }
     
     /* Channel groups */
@@ -154,6 +156,10 @@
       const [settingsBusy, setSettingsBusy] = useState(false);
       const [settingsError, setSettingsError] = useState('');
       const [settingsNote, setSettingsNote] = useState('');
+      const [tmdbKey, setTmdbKey] = useState('');
+      const [tmdbBusy, setTmdbBusy] = useState(false);
+      const [tmdbError, setTmdbError] = useState('');
+      const [tmdbNote, setTmdbNote] = useState('');
       const [loading, setLoading] = useState(true);
       const [users, setUsers] = useState([]);
       const [showModal, setShowModal] = useState(false);
@@ -408,6 +414,27 @@
         }
       };
 
+      // An empty key removes the one saved
+      const saveTmdbKey = async (key) => {
+        setTmdbBusy(true);
+        setTmdbError('');
+        setTmdbNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ tmdbKey: key })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setTmdbKey('');
+          setTmdbNote(key ? 'Key accepted by TMDB and saved.' : 'Key removed.');
+        } catch (err) {
+          setTmdbError(err.message);
+        } finally {
+          setTmdbBusy(false);
+        }
+      };
+
       const openView = (next) => (e) => {
         e.preventDefault();
         setView(next);
@@ -490,6 +517,49 @@
                   <small className="settings-foot">
                     Recordings already made keep their files where they are; only new ones use the new folder.
                   </small>
+                </form>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>🎞️ Film and episode details</h3>
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); if (tmdbKey.trim()) saveTmdbKey(tmdbKey.trim()); }} className="settings-body">
+                  <div className="form-group">
+                    <label>TMDB key</label>
+                    <input
+                      type="password"
+                      value={tmdbKey}
+                      onChange={e => setTmdbKey(e.target.value)}
+                      placeholder={settings?.settings?.tmdbKeySet ? 'Saved. Type a new one to replace it' : 'API key or read access token'}
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                    <small>
+                      In the Library, a recording can be linked to its film or episode by pasting its IMDb or TMDB link.
+                      With a key from <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer">themoviedb.org</a> (free
+                      with an account) the app shows the synopsis, series, season and episode, in Portuguese and English.
+                      Without it, only IMDb links work and show just the English title, picture and year.
+                    </small>
+                  </div>
+
+                  {settings && (
+                    <div className={`settings-status ${settings.settings.tmdbKeySet ? 'ok' : 'bad'}`}>
+                      {settings.settings.tmdbKeySet ? 'A TMDB key is saved.' : 'No TMDB key saved.'}
+                    </div>
+                  )}
+
+                  {tmdbError && <div className="error-msg">{tmdbError}</div>}
+                  {tmdbNote && <div className="success-msg">{tmdbNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={tmdbBusy || !tmdbKey.trim()}>
+                    {tmdbBusy ? 'Checking...' : 'Save key'}
+                  </button>
+                  {settings?.settings?.tmdbKeySet && (
+                    <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={tmdbBusy} onClick={() => confirm('Remove the TMDB key?') && saveTmdbKey('')}>
+                      Remove key
+                    </button>
+                  )}
                 </form>
               </div>
             </main>

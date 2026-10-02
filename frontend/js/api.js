@@ -144,6 +144,15 @@ const api = {
     return this.fetch(`/recordings/${id}`, { method: 'DELETE' });
   },
   
+  // Film or episode a recording is, from its IMDb or TMDB link
+  async recordingLink(id, link) {
+    return this.fetch(`/recordings/${id}/metadata`, { method: 'PUT', body: JSON.stringify({ link }) });
+  },
+
+  async recordingUnlink(id) {
+    return this.fetch(`/recordings/${id}/metadata`, { method: 'DELETE' });
+  },
+
   async recordingTicket(id) {
     return this.fetch(`/recordings/${id}/ticket`, { method: 'POST' });
   },

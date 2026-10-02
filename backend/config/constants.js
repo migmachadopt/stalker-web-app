@@ -44,6 +44,12 @@ module.exports = {
   CONVERT_PRESET: process.env.CONVERT_PRESET || 'veryfast', // x264 speed/size trade-off
   CONVERT_CRF: process.env.CONVERT_CRF || '20',             // x264 quality (lower is better)
 
+  // Film and episode details for the library (see metadataService)
+  TMDB_API: process.env.TMDB_API || 'https://api.themoviedb.org/3',
+  TMDB_IMAGES: 'https://image.tmdb.org/t/p',
+  IMDB_SUGGEST: process.env.IMDB_SUGGEST || 'https://v3.sg.media-imdb.com/suggestion/x',
+  METADATA_LANGUAGES: { pt: ['pt-PT', 'pt-BR'], en: ['en-US'] }, // app language -> TMDB languages, best first
+
   // Video club & series catalogue
   VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes
 
