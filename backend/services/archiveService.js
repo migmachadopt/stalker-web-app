@@ -183,14 +183,25 @@ class ArchiveService {
 
     const now = Math.floor(Date.now() / 1000);
     const wantedStart = Number.isFinite(Number(start)) ? Math.floor(Number(start)) : seed.start;
-    const wantedDuration = Number.isFinite(Number(duration)) ? Math.floor(Number(duration)) : seed.stop - seed.start;
-
-    if (wantedDuration < 60 || wantedDuration > config.ARCHIVE_MAX_WINDOW) {
-      throw new Error(`Interval must be between 1 minute and ${config.ARCHIVE_MAX_WINDOW / 3600} hours`);
-    }
+    let wantedDuration = Number.isFinite(Number(duration)) ? Math.floor(Number(duration)) : seed.stop - seed.start;
+    const isSeedWindow = wantedStart === seed.start && wantedDuration === seed.stop - seed.start;
 
     if (wantedStart >= now) {
       throw new Error('Interval starts in the future');
+    }
+
+    // Nothing is recorded past this moment: a programme still on air, or a
+    // margin after one that has just ended, stops at "now"
+    if (wantedStart + wantedDuration > now) {
+      wantedDuration = now - wantedStart;
+
+      if (wantedDuration < 60) {
+        throw new Error('This programme has only just started - try again in a minute');
+      }
+    }
+
+    if (wantedDuration < 60 || wantedDuration > config.ARCHIVE_MAX_WINDOW) {
+      throw new Error(`Interval must be between 1 minute and ${config.ARCHIVE_MAX_WINDOW / 3600} hours`);
     }
 
     if (channel.archiveHours && wantedStart < now - channel.archiveHours * 3600) {
@@ -198,7 +209,6 @@ class ArchiveService {
     }
 
     const link = await iptvService.createArchiveLink(sessionId, seed.id);
-    const isSeedWindow = wantedStart === seed.start && wantedDuration === seed.stop - seed.start;
     const match = TIMESHIFT_PATTERN.exec(link);
 
     if (!match) {

@@ -3970,3 +3970,29 @@ video::cue {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Download margin pickers */
+.dl-margin {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin-top: var(--space-md);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.dl-margin label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dl-margin select {
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+}

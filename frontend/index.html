@@ -1075,6 +1075,57 @@
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // DOWNLOAD MARGIN - extra minutes before and after a recorded programme
+    // ═══════════════════════════════════════════════════════════════════════
+    // Broadcasts rarely start and end on the minute the guide says. The choice
+    // is remembered in this browser and applies to every programme download.
+
+    const MARGIN_MINUTES = [0, 5, 10, 15, 20, 30, 45, 60];
+
+    const readDownloadMargin = () => {
+      try {
+        const stored = JSON.parse(localStorage.getItem('download:margin')) || {};
+        return { before: Number(stored.before) || 0, after: Number(stored.after) || 0 };
+      } catch (_) {
+        return { before: 0, after: 0 };
+      }
+    };
+
+    // Extra fields for an archive request so the download includes the margin
+    const withDownloadMargin = (program) => {
+      const margin = readDownloadMargin();
+      if (!margin.before && !margin.after) return {};
+      return {
+        start: program.start - margin.before * 60,
+        duration: (program.stop - program.start) + (margin.before + margin.after) * 60
+      };
+    };
+
+    function DownloadMargin() {
+      const [margin, setMargin] = useState(readDownloadMargin);
+
+      const change = (side, minutes) => {
+        const next = { ...margin, [side]: Number(minutes) };
+        setMargin(next);
+        try { localStorage.setItem('download:margin', JSON.stringify(next)); } catch (_) {}
+      };
+
+      const picker = (side) => (
+        <select value={margin[side]} onChange={(e) => change(side, e.target.value)}>
+          {MARGIN_MINUTES.map(m => <option key={m} value={m}>{m === 0 ? 'none' : `${m} min`}</option>)}
+        </select>
+      );
+
+      return (
+        <div className="dl-margin">
+          <span>Download margin</span>
+          <label>before {picker('before')}</label>
+          <label>after {picker('after')}</label>
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // RECORDINGS GUIDE - programme timeline per channel
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -1546,6 +1597,7 @@
                         <button className="vod-secondary" onClick={() => onWatchLive(selected.channel)}><span className="live-dot"></span> Watch live</button>
                       )}
                     </div>
+                    {canPlaySelected && <DownloadMargin />}
                     {!canPlaySelected && selectedState !== 'live' && (
                       <div className="vod-credits">
                         {selectedState === 'future' ? 'This programme has not aired yet.' : 'This programme is not in the archive.'}
@@ -2198,7 +2250,7 @@
       const downloadArchiveProgram = async (program) => {
         setArchiveError('');
         try {
-          const data = await requestArchive(archiveChannel, programWindow(program));
+          const data = await requestArchive(archiveChannel, { ...programWindow(program), ...withDownloadMargin(program) });
           startDownload(data.streamUrl);
         } catch (err) {
           setArchiveError(err.message);
@@ -2394,7 +2446,7 @@
       };
 
       const downloadGuideProgram = async (channel, date, program) => {
-        const data = await requestArchive(channel, guideWindow(date, program));
+        const data = await requestArchive(channel, { ...guideWindow(date, program), ...withDownloadMargin(program) });
         startDownload(data.streamUrl);
       };
 
@@ -2894,6 +2946,8 @@
                   })}
                 </div>
                 
+                <DownloadMargin />
+
                 <div className="archive-interval">
                   <label>Download an interval of this day</label>
                   <div className="archive-interval-row">
