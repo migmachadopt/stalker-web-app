@@ -1101,6 +1101,12 @@
       const runningRef = useRef(0);
       const requestedRef = useRef(new Set());
 
+      // Search: filter the channel rows, or look for programmes in the recordings
+      const [searchMode, setSearchMode] = useState('channels');
+      const [programQuery, setProgramQuery] = useState('');
+      const [search, setSearch] = useState(null);     // { query, results, done, total, running, error }
+      const searchRun = useRef(0);
+
       const archiveChannels = channels.filter(c => c.archive);
       const maxHours = archiveChannels.reduce((max, c) => Math.max(max, c.archiveHours || 0), 24);
 
@@ -1113,7 +1119,7 @@
         return { date: localDate(d), label };
       });
 
-      const term = searchTerm.trim().toLowerCase();
+      const term = searchMode === 'channels' ? searchTerm.trim().toLowerCase() : '';
       const rows = archiveChannels
         .filter(c => genre === 'all' || c.tv_genre_id === genre)
         .filter(c => !term || c.name.toLowerCase().includes(term) || String(c.number).includes(term))
@@ -1197,15 +1203,106 @@
         return () => window.removeEventListener('keydown', onKey);
       }, []);
 
+      // Programme search goes day by day (newest first) and a few channels at a
+      // time, so results show up while the older days are still being read
+      const startProgramSearch = async () => {
+        const query = programQuery.trim();
+        if (query.length < 2) return;
+
+        const runId = ++searchRun.current;
+        const scope = archiveChannels
+          .filter(c => genre === 'all' || c.tv_genre_id === genre)
+          .sort((a, b) => a.number - b.number);
+
+        const steps = [];
+        days.forEach(day => {
+          for (let i = 0; i < scope.length; i += 10) {
+            steps.push({ date: day.date, ids: scope.slice(i, i + 10).map(c => c.id) });
+          }
+        });
+
+        setSearch({ query, results: [], done: 0, total: steps.length, channels: scope.length, running: steps.length > 0, error: '' });
+
+        for (const step of steps) {
+          if (searchRun.current !== runId) return;
+
+          let data;
+          try {
+            data = await api.iptvSearchEpg(query, step.date, step.ids);
+          } catch (err) {
+            data = { success: false, error: 'Search failed' };
+          }
+          if (searchRun.current !== runId) return;
+
+          setSearch(prev => prev && ({
+            ...prev,
+            done: prev.done + 1,
+            error: data.success ? prev.error : (data.error || 'Search failed'),
+            results: data.success
+              ? prev.results.concat(data.results.map(r => ({ ...r, date: step.date })))
+              : prev.results
+          }));
+        }
+
+        setSearch(prev => prev && ({ ...prev, running: false }));
+      };
+
+      const stopProgramSearch = () => {
+        searchRun.current++;
+        setSearch(prev => prev && ({ ...prev, running: false, stopped: true }));
+      };
+
+      const closeProgramSearch = () => {
+        searchRun.current++;
+        setSearch(null);
+      };
+
+      // Stop a running search when the guide goes away
+      useEffect(() => () => { searchRun.current++; }, []);
+
+      const channelById = {};
+      archiveChannels.forEach(c => { channelById[c.id] = c; });
+
+      // Newest first, one entry per broadcast, grouped by the day it aired
+      const searchGroups = (() => {
+        if (!search) return [];
+        const seen = new Set();
+        const groups = [];
+        search.results
+          .filter(r => channelById[r.channelId])
+          .sort((a, b) => b.start - a.start)
+          .forEach(result => {
+            const id = `${result.channelId}:${result.start}`;
+            if (seen.has(id)) return;
+            seen.add(id);
+
+            const aired = localDate(new Date(result.start * 1000));
+            let group = groups[groups.length - 1];
+            if (!group || group.aired !== aired) {
+              const known = days.find(d => d.date === aired);
+              group = {
+                aired,
+                label: known ? known.label : new Date(result.start * 1000).toLocaleDateString([], { weekday: 'short', day: '2-digit', month: '2-digit' }),
+                items: []
+              };
+              groups.push(group);
+            }
+            group.items.push(result);
+          });
+        return groups;
+      })();
+      const searchCount = searchGroups.reduce((n, group) => n + group.items.length, 0);
+
       const programState = (program) => {
         if (program.stop <= nowSeconds) return program.archive ? 'available' : 'unavailable';
         if (program.start <= nowSeconds) return 'live';
         return 'future';
       };
 
-      const openProgram = (channel, program) => {
+      // `day` is the guide day the programme was listed under (needed to play it)
+      const openProgram = (channel, program, day = date) => {
         setActionError('');
-        setSelected({ channel, program });
+        setSelected({ channel, program, date: day });
       };
 
       const run = async (action) => {
@@ -1232,19 +1329,44 @@
               <option value="all">All groups</option>
               {genres.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
             </select>
+            <div className="guide-mode">
+              <button
+                className={searchMode === 'channels' ? 'active' : ''}
+                onClick={() => setSearchMode('channels')}
+              >
+                Channels
+              </button>
+              <button
+                className={searchMode === 'programmes' ? 'active' : ''}
+                onClick={() => setSearchMode('programmes')}
+              >
+                Programmes
+              </button>
+            </div>
             <div className="search-container vod-search">
               <span className="search-icon"><Icon name="search" size={16} /></span>
-              <input
-                type="text"
-                className="search-input"
-                placeholder="Search channels..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
+              {searchMode === 'channels' ? (
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Filter channels..."
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                />
+              ) : (
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder={`Search programmes in ${genre === 'all' ? 'all groups' : (genres.find(g => g.id === genre)?.name || 'this group')}, then Enter`}
+                  value={programQuery}
+                  onChange={(e) => setProgramQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') startProgramSearch(); }}
+                />
+              )}
             </div>
           </div>
 
-          <div className="guide-days">
+          <div className="guide-days" style={{ display: search ? 'none' : undefined }}>
             {days.map(day => (
               <button
                 key={day.date}
@@ -1262,7 +1384,62 @@
             {isToday && <button className="guide-now-btn" onClick={() => scrollToMinute(nowMinutes - 60)}>Now</button>}
           </div>
 
-          {rows.length === 0 ? (
+          {search ? (
+            <div className="guide-results">
+              <div className="guide-results-bar">
+                <button className="vod-back" onClick={closeProgramSearch} title="Back to the timeline"><Icon name="back" /></button>
+                <div className="guide-results-status">
+                  <strong>{searchCount} {searchCount === 1 ? 'recording' : 'recordings'} for "{search.query}"</strong>
+                  <span>
+                    {search.running
+                      ? `Searching ${search.channels} channels... ${Math.round((search.done / search.total) * 100)}%`
+                      : search.stopped
+                        ? `Stopped at ${Math.round((search.done / search.total) * 100)}% of ${search.channels} channels, ${days.length} days`
+                        : `Searched ${search.channels} channels, ${days.length} days`}
+                  </span>
+                </div>
+                {search.running && <button className="pc-pill" onClick={stopProgramSearch}>Stop</button>}
+              </div>
+              {search.running && (
+                <div className="guide-progress"><span style={{ width: `${(search.done / search.total) * 100}%` }}></span></div>
+              )}
+              {search.error && <div className="vod-message"><div className="error-msg">{search.error}</div></div>}
+
+              <div className="guide-results-list">
+                {searchGroups.map(group => (
+                  <React.Fragment key={group.aired}>
+                    <div className="guide-results-day">{group.label}</div>
+                    {group.items.map(result => {
+                      const channel = channelById[result.channelId];
+                      return (
+                        <div
+                          key={`${result.channelId}:${result.start}`}
+                          className="guide-result"
+                          onClick={() => openProgram(channel, result, result.date)}
+                        >
+                          <span className="guide-result-time">{clockTime(result.start)} – {clockTime(result.stop)}</span>
+                          <img
+                            src={channel.logo || CHANNEL_LOGO_FALLBACK}
+                            alt=""
+                            loading="lazy"
+                            onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                          />
+                          <span className="guide-result-text">
+                            <span className="guide-result-name">{result.name}</span>
+                            <span className="guide-result-sub">{channel.name}{result.descr ? ` · ${result.descr}` : ''}</span>
+                          </span>
+                          <Icon name="play" size={14} filled />
+                        </div>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+                {!search.running && searchCount === 0 && !search.error && (
+                  <div className="vod-message">No recordings match "{search.query}".</div>
+                )}
+              </div>
+            </div>
+          ) : rows.length === 0 ? (
             <div className="vod-message">
               {archiveChannels.length === 0
                 ? 'None of your channels keeps recordings.'
@@ -1348,7 +1525,7 @@
                     <h2>{selected.program.name}</h2>
                     <div className="vod-meta">
                       <span>{selected.channel.name}</span>
-                      <span>{days.find(d => d.date === date)?.label}</span>
+                      <span>{(days.find(d => d.date === selected.date)?.label || selected.date)}</span>
                       <span>{clockTime(selected.program.start)} – {clockTime(selected.program.stop)}</span>
                       <span>{Math.round((selected.program.stop - selected.program.start) / 60)} min</span>
                     </div>
@@ -1356,12 +1533,12 @@
 
                     <div className="vod-actions">
                       {canPlaySelected && (
-                        <button className="vod-play" disabled={busy} onClick={() => run(async () => { await onPlay(selected.channel, date, selected.program); setSelected(null); })}>
+                        <button className="vod-play" disabled={busy} onClick={() => run(async () => { await onPlay(selected.channel, selected.date, selected.program); setSelected(null); })}>
                           <Icon name="play" size={16} filled /> {selectedState === 'live' ? 'Play from start' : 'Play'}
                         </button>
                       )}
                       {canPlaySelected && (
-                        <button className="vod-secondary" disabled={busy} onClick={() => run(() => onDownload(selected.channel, date, selected.program))}>
+                        <button className="vod-secondary" disabled={busy} onClick={() => run(() => onDownload(selected.channel, selected.date, selected.program))}>
                           <Icon name="download" size={16} /> Download
                         </button>
                       )}

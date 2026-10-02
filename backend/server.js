@@ -524,6 +524,46 @@ app.post('/api/iptv/epg', authMiddleware, async (req, res) => {
   }
 });
 
+// Search recorded programmes by title or description, one day and a few channels per call
+app.post('/api/iptv/epg/search', authMiddleware, async (req, res) => {
+  try {
+    const { sessionId, query, date, channelIds } = req.body;
+    
+    const session = iptvService.getSession(sessionId);
+    
+    if (!session) {
+      return res.status(410).json({ success: false, error: 'Invalid IPTV session' });
+    }
+    
+    if (session.userId !== req.user.userId) {
+      return res.status(403).json({ success: false, error: 'Session access denied' });
+    }
+    
+    if (typeof query !== 'string' || query.trim().length < 2) {
+      return res.status(400).json({ success: false, error: 'Type at least two characters' });
+    }
+    
+    if (!Array.isArray(channelIds) || channelIds.length === 0 || channelIds.length > 20) {
+      return res.status(400).json({ success: false, error: 'Between 1 and 20 channels per search request' });
+    }
+    
+    const user = userService.findUserById(req.user.userId);
+    
+    // Only channels the user may see, and that keep recordings
+    const searchable = channelIds
+      .map(id => user && channelListService.findVisibleChannel(user, id))
+      .filter(channel => channel && channel.archive);
+    
+    const results = await archiveService.search(sessionId, user.id, searchable, date, query.trim().slice(0, 80));
+    
+    res.json({ success: true, date, searched: searchable.length, results });
+    
+  } catch (error) {
+    logger.error('iptv', 'Programme search error', { error: error.message });
+    res.status(error.message === 'Invalid date' ? 400 : 500).json({ success: false, error: 'Programme search failed' });
+  }
+});
+
 // Programme on air and the ones that follow, for the live player
 app.post('/api/iptv/epg/now', authMiddleware, async (req, res) => {
   try {

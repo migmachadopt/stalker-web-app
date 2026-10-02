@@ -144,3 +144,6 @@ backend/data/channels-*.enc
 
 # Stored subtitles
 backend/data/subtitles/
+
+# Stored programme guide
+backend/data/epg/

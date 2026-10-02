@@ -102,6 +102,11 @@ const api = {
     return this.iptvCall('/iptv/epg', { channelId, date });
   },
   
+  // Recorded programmes matching `query`, for one day and up to 20 channels
+  async iptvSearchEpg(query, date, channelIds) {
+    return this.iptvCall('/iptv/epg/search', { query, date, channelIds });
+  },
+  
   // Programme on air (first) and the next ones
   async iptvGetNow(channelId) {
     return this.iptvCall('/iptv/epg/now', { channelId });
