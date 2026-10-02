@@ -3611,3 +3611,210 @@ video::cue {
   color: #fff;
   background: rgba(0, 0, 0, 0.6);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE VERSION
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.mobile-view body {
+  overscroll-behavior: none;
+}
+
+.m-app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  height: 100dvh;
+  background: var(--glow), var(--bg-primary);
+  padding-top: env(safe-area-inset-top);
+}
+
+.m-player {
+  flex: 0 0 auto;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 46vh;
+  border-radius: 0;
+}
+
+.m-player.fullscreen,
+.m-player:fullscreen {
+  max-height: none;
+  aspect-ratio: auto;
+}
+
+.m-player .no-channel-message p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+
+.m-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  flex-shrink: 0;
+}
+
+.m-bar .search-container {
+  flex: 1;
+  min-width: 0;
+}
+
+.m-bar .search-input {
+  /* 16px keeps iOS from zooming the page when the field is focused */
+  font-size: 16px;
+}
+
+.m-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.m-icon:active {
+  background: var(--surface-hover);
+}
+
+.m-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 8px calc(12px + env(safe-area-inset-bottom));
+}
+
+.m-channel {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.m-channel:active {
+  background: var(--surface);
+}
+
+.m-channel.playing {
+  background: var(--accent-subtle);
+}
+
+.m-channel img {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.m-channel-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.m-channel.playing .m-channel-name {
+  color: var(--accent-primary);
+}
+
+.m-note {
+  padding: 24px 16px;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.m-desktop-link {
+  display: block;
+  padding: 18px 0 6px;
+  color: var(--text-tertiary);
+  font-size: 0.8125rem;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* Compact player controls on a phone */
+.mobile-view .pc-top {
+  top: 8px;
+  right: 8px;
+  gap: 8px;
+}
+
+.mobile-view .pc-round {
+  width: 34px;
+  height: 34px;
+}
+
+.mobile-view .pc-bottom {
+  left: 12px;
+  right: 12px;
+  bottom: 8px;
+}
+
+.mobile-view .pc-title {
+  font-size: 1rem;
+}
+
+.mobile-view .pc-subtitle {
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-view .pc-row {
+  margin-top: 6px;
+}
+
+.mobile-view .pc-play {
+  width: 38px;
+  height: 38px;
+}
+
+.mobile-view .pc-volume {
+  display: none;
+}
+
+.mobile-view .pc::after {
+  height: 130px;
+}
+
+.mobile-view .login-card {
+  width: auto;
+  margin: 0 16px;
+  padding: 28px 22px;
+}
+
+.mobile-view .form-group input {
+  font-size: 16px;
+}
+
+.prefs-link {
+  display: block;
+  margin-top: var(--space-md);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
+.prefs-link:hover {
+  color: var(--accent-primary);
+}

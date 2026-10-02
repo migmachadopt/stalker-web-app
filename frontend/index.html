@@ -2,7 +2,8 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#05060a">
   <title>IPTV Player</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -27,6 +28,34 @@
     
     // Backend origin used for stream proxy (API_URL comes from api.js)
     const BACKEND_ORIGIN = new URL(API_URL, window.location.href).origin;
+
+    // ── Phone or desktop version ─────────────────────────────────────────────
+    // Phones are sent to the mobile version (?view=mobile) when the app opens.
+    // Choosing a version by hand (?view=mobile / ?view=desktop) is remembered.
+    const MOBILE_VIEW = (() => {
+      const requested = new URLSearchParams(window.location.search).get('view');
+      const chosen = requested === 'mobile' || requested === 'desktop' ? requested : null;
+
+      let remembered = null;
+      try {
+        if (chosen) localStorage.setItem('view', chosen);
+        remembered = localStorage.getItem('view');
+      } catch (_) {}
+
+      const smallestSide = Math.min(window.screen.width, window.screen.height);
+      const isPhone = /iPhone|iPod|Android.*Mobile|Mobile.*Firefox|Windows Phone/i.test(navigator.userAgent)
+        || (window.matchMedia('(pointer: coarse)').matches && smallestSide <= 500);
+
+      const mobile = (chosen || remembered || (isPhone ? 'mobile' : 'desktop')) === 'mobile';
+
+      if (mobile && chosen !== 'mobile') {
+        window.location.replace(`${window.location.pathname}?view=mobile`);
+      }
+
+      return mobile;
+    })();
+
+    if (MOBILE_VIEW) document.documentElement.classList.add('mobile-view');
 
     // ═══════════════════════════════════════════════════════════════════════
     // ICONS (stroke icons, 24x24)
@@ -160,8 +189,11 @@
       };
 
       const toggleFullscreen = () => {
+        const el = container();
         if (document.fullscreenElement) document.exitFullscreen();
-        else container()?.requestFullscreen?.();
+        else if (el?.requestFullscreen) el.requestFullscreen();
+        // iPhone only puts the video element itself in fullscreen
+        else videoRef.current?.webkitEnterFullscreen?.();
       };
 
       const togglePip = () => {
@@ -1010,6 +1042,7 @@
                 ref={videoRef}
                 src={`${BACKEND_ORIGIN}${playing.streamUrl}`}
                 autoPlay
+                playsInline
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
                 onError={handleVideoError}
@@ -1422,6 +1455,7 @@
       // Theme
       const [currentTheme, setCurrentTheme] = useState(localStorage.getItem('theme') || 'midnight');
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+      const [mobileSearch, setMobileSearch] = useState('');
 
       // Apply theme
       useEffect(() => {
@@ -2114,7 +2148,8 @@
             if (cancelled) return;
             
             const now = Date.now() / 1000;
-            const programs = data.success ? data.programs : [];
+            // Day-long entries are placeholders some channels carry instead of a real guide
+            const programs = (data.success ? data.programs : []).filter(p => p.stop - p.start <= 12 * 3600);
             const current = programs.find(p => p.start <= now && p.stop > now) || null;
             const next = programs.find(p => p.start > now) || null;
             setOnAir(current || next ? { current, next } : null);
@@ -2274,6 +2309,112 @@
             <div className="spinner"></div>
             <div className="loading-text">Loading IPTV</div>
             <div className="loading-progress">{loadingProgress}</div>
+          </div>
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // MOBILE VERSION - one flat list of the channels made for phones
+      // ═══════════════════════════════════════════════════════════════════════
+      
+      if (MOBILE_VIEW) {
+        // The provider's "Mobile" group; any other enabled channel only if there is none
+        const mobileGroupIds = new Set(genres.filter(g => /mobile/i.test(g.name)).map(g => g.id));
+        const base = mobileGroupIds.size ? channels.filter(ch => mobileGroupIds.has(ch.tv_genre_id)) : channels;
+        const term = mobileSearch.trim().toLowerCase();
+        const list = base
+          .filter(ch => !term || ch.name.toLowerCase().includes(term) || String(ch.number).includes(term))
+          .sort((a, b) => a.number - b.number);
+        const themes = ['midnight', 'carbon', 'ocean'];
+
+        return (
+          <div className="m-app">
+            <div className={`m-player player-section ${isFullscreen ? 'fullscreen' : ''}`}>
+              {currentChannel ? (
+                <React.Fragment>
+                  <div className="video-container">
+                    <video ref={videoRef} playsInline />
+                  </div>
+                  {playerNotice && <div className="player-notice">{playerNotice}</div>}
+                  <PlayerControls
+                    key={`live-${currentChannel.id}`}
+                    videoRef={videoRef}
+                    live
+                    title={currentChannel.name.replace(/\s*MOBILE\s*$/i, '')}
+                    subtitle={onAir?.current
+                      ? `${onAir.current.name} • ${clockTime(onAir.current.start)} – ${clockTime(onAir.current.stop)}`
+                      : null}
+                  />
+                </React.Fragment>
+              ) : (
+                <div className="no-channel-message">
+                  <div className="icon"><Icon name="tv" size={36} /></div>
+                  <p>Choose a channel</p>
+                </div>
+              )}
+            </div>
+
+            <div className="m-bar">
+              <div className="search-container">
+                <span className="search-icon"><Icon name="search" size={16} /></span>
+                <input
+                  type="search"
+                  className="search-input"
+                  placeholder="Search channels..."
+                  value={mobileSearch}
+                  onChange={(e) => setMobileSearch(e.target.value)}
+                />
+              </div>
+              <button
+                className="m-icon"
+                title={`Theme: ${currentTheme}`}
+                onClick={() => setCurrentTheme(themes[(themes.indexOf(currentTheme) + 1) % themes.length])}
+              >
+                <Icon name="droplet" size={18} />
+              </button>
+              <button
+                className="m-icon"
+                title="Refresh channel list"
+                disabled={isRefreshing}
+                onClick={handleRefreshChannels}
+              >
+                <span className={isRefreshing ? 'spin' : ''}><Icon name="refresh" size={18} /></span>
+              </button>
+              <button className="m-icon" title="Sign out" onClick={handleLogout}>
+                <Icon name="logout" size={18} />
+              </button>
+            </div>
+
+            {listError && <div className="m-note"><div className="error-msg">{listError}</div></div>}
+
+            <div className="m-list">
+              {list.map(channel => (
+                <div
+                  key={channel.id}
+                  className={`m-channel ${currentChannel?.id === channel.id ? 'playing' : ''}`}
+                  onClick={() => playChannel(channel)}
+                >
+                  <img
+                    src={channel.logo || CHANNEL_LOGO_FALLBACK}
+                    alt=""
+                    loading="lazy"
+                    onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                  />
+                  <span className="m-channel-name">{channel.name.replace(/\s*MOBILE\s*$/i, '')}</span>
+                  {currentChannel?.id === channel.id && <span className="live-dot"></span>}
+                </div>
+              ))}
+
+              {list.length === 0 && (
+                <div className="m-note">
+                  {channels.length === 0
+                    ? 'No channels are enabled for your account. Ask the administrator to enable the Mobile group.'
+                    : 'No channels match your search.'}
+                </div>
+              )}
+
+              <a className="m-desktop-link" href="?view=desktop">Open the full version</a>
+            </div>
           </div>
         );
       }
@@ -2460,7 +2601,7 @@
               {currentChannel ? (
                 <>
                   <div className="video-container">
-                    <video ref={videoRef} />
+                    <video ref={videoRef} playsInline />
                   </div>
                   {playerNotice && <div className="player-notice">{playerNotice}</div>}
                   <PlayerControls
@@ -2634,6 +2775,8 @@
                     </button>
                   </div>
                 </div>
+
+                <a className="prefs-link" href="?view=mobile">Open the mobile version</a>
 
                 <button 
                   type="button" 
