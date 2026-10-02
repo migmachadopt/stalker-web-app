@@ -3996,3 +3996,10 @@ video::cue {
   color: var(--text-primary);
   font-size: 0.8125rem;
 }
+
+.guide-results-note {
+  padding: 8px 18px;
+  flex-shrink: 0;
+  color: var(--status-warning);
+  font-size: 0.78rem;
+}

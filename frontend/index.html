@@ -1277,18 +1277,24 @@
         for (const step of steps) {
           if (searchRun.current !== runId) return;
 
+          // A part can fail for a moment (server restarting, portal busy): try it
+          // again before counting it as not searched
           let data;
-          try {
-            data = await api.iptvSearchEpg(query, step.date, step.ids);
-          } catch (err) {
-            data = { success: false, error: 'Search failed' };
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              data = await api.iptvSearchEpg(query, step.date, step.ids);
+            } catch (err) {
+              data = { success: false };
+            }
+            if (data.success || searchRun.current !== runId) break;
+            await new Promise(resolve => setTimeout(resolve, attempt * 2000));
           }
           if (searchRun.current !== runId) return;
 
           setSearch(prev => prev && ({
             ...prev,
             done: prev.done + 1,
-            error: data.success ? prev.error : (data.error || 'Search failed'),
+            skipped: (prev.skipped || 0) + (data.success ? 0 : 1),
             results: data.success
               ? prev.results.concat(data.results.map(r => ({ ...r, date: step.date })))
               : prev.results
@@ -1454,7 +1460,11 @@
               {search.running && (
                 <div className="guide-progress"><span style={{ width: `${(search.done / search.total) * 100}%` }}></span></div>
               )}
-              {search.error && <div className="vod-message"><div className="error-msg">{search.error}</div></div>}
+              {search.skipped > 0 && (
+                <div className="guide-results-note">
+                  {search.skipped} of {search.total} parts could not be searched; results may be incomplete. Search again to retry them.
+                </div>
+              )}
 
               <div className="guide-results-list">
                 {searchGroups.map(group => (
@@ -1485,7 +1495,7 @@
                     })}
                   </React.Fragment>
                 ))}
-                {!search.running && searchCount === 0 && !search.error && (
+                {!search.running && searchCount === 0 && (
                   <div className="vod-message">No recordings match "{search.query}".</div>
                 )}
               </div>
