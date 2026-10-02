@@ -26,7 +26,9 @@ module.exports = {
   CHANNEL_LIST_VERSION: 2, // bump when the stored channel fields change
   
   // TV archive (catch-up)
-  EPG_CACHE_TTL: 15 * 60 * 1000, // 15 minutes, for the day in progress
+  EPG_CACHE_TTL: 40 * 60 * 1000, // 40 minutes, for the day in progress (the sync refreshes it every 30)
+  GUIDE_SYNC_INTERVAL: 30 * 60 * 1000, // background guide sync, while someone uses the app
+  GUIDE_TIMEZONE: 'Europe/Lisbon', // the portal's calendar days
   EPG_EMPTY_RETRY: 6 * 60 * 60 * 1000, // an empty stored guide is asked for again after 6 hours
   GUIDE_KEEP_DAYS: 10, // stored guide days older than this are deleted
   EPG_NOW_CACHE_TTL: 60 * 1000, // 1 minute, for the programme on air

@@ -18,30 +18,68 @@ const normalize = (text) => String(text || '').normalize('NFD').replace(/[\u0300
 
 class ArchiveService {
   constructor() {
-    this.epgCache = new Map(); // `${portal}:${channelId}:${date}` -> { at, programs }
+    this.epgCache = new Map(); // `${portal}:${channelId}:now` -> { at, programs }
     this.days = new Map();     // `${portal}:${date}` -> { file, channels: { id: { at, programs } }, timer }
+    this.foreground = 0;       // guide requests made for someone waiting on the screen
+    this.fetches = 0;          // guide days read from the portal (for the sync's log)
   }
 
-  // ── Finished days are kept on disk: their guide no longer changes, and it
-  //    is what makes searching programmes across channels fast ─────────────
+  // ── The guide is kept on disk, one file per portal and day. A finished day
+  //    no longer changes and is read from the portal once; the day in progress
+  //    is read again after a while. The background sync keeps both up to date.
 
-  loadDay(portal, date) {
+  dayFile(portal, date) {
+    return path.join(GUIDE_DIR, `${portal.replace(/[^a-zA-Z0-9.-]/g, '_')}_${date}.json`);
+  }
+
+  loadDay(portal, date, alias = null) {
     const key = `${portal}:${date}`;
     let day = this.days.get(key);
 
     if (!day) {
-      const file = path.join(GUIDE_DIR, `${portal.replace(/[^a-zA-Z0-9.-]/g, '_')}_${date}.json`);
+      const file = this.dayFile(portal, date);
       let channels = {};
       try {
         channels = JSON.parse(fs.readFileSync(file, 'utf8'));
       } catch (_) {
         // not stored yet
       }
+
+      // Days stored under the server a redirector sent us to, before the guide
+      // was kept under the configured address
+      if (alias && alias !== portal) {
+        try {
+          const old = JSON.parse(fs.readFileSync(this.dayFile(alias, date), 'utf8'));
+          for (const [id, entry] of Object.entries(old)) {
+            if (!channels[id] || channels[id].at < entry.at) channels[id] = entry;
+          }
+        } catch (_) {
+          // nothing stored there either
+        }
+      }
+
       day = { file, channels, timer: null };
       this.days.set(key, day);
     }
 
     return day;
+  }
+
+  // Is a stored guide still good to use?
+  isFresh(entry, date) {
+    const age = Date.now() - entry.at;
+
+    // Read at least two hours after the day ended: it will not change any more
+    // (programmes aired late that day are then marked as recorded too)
+    const dayEnd = Date.parse(`${date}T00:00:00Z`) + 24 * 3600 * 1000;
+    const final = entry.at >= dayEnd + 2 * 3600 * 1000;
+
+    if (final) {
+      // An empty guide may only be one that arrived late: ask again now and then
+      return entry.programs.length > 0 || age < config.EPG_EMPTY_RETRY;
+    }
+
+    return age < config.EPG_CACHE_TTL;
   }
 
   saveDay(day) {
@@ -74,47 +112,33 @@ class ArchiveService {
     }
   }
 
-  // Programmes of one channel for one day (YYYY-MM-DD, portal timezone)
-  async getEpg(sessionId, userId, channelId, date) {
+  // Programmes of one channel for one day (YYYY-MM-DD, portal timezone).
+  // `background`: asked by the sync, which gives way to people waiting.
+  async getEpg(sessionId, userId, channelId, date, { background = false } = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date))) {
       throw new Error('Invalid date');
     }
 
     // The guide is the same for every account of a portal
     const portal = iptvService.getPortalKey(sessionId);
+    const day = this.loadDay(portal, date, iptvService.getServerKey(sessionId));
+    const stored = day.channels[channelId];
 
-    // A finished day no longer changes; today's guide still does
-    const today = new Date().toISOString().slice(0, 10);
-
-    if (date < today) {
-      const day = this.loadDay(portal, date);
-      const stored = day.channels[channelId];
-
-      // An empty guide may only be a channel whose guide arrived late: ask again later
-      if (stored && (stored.programs.length || Date.now() - stored.at < config.EPG_EMPTY_RETRY)) {
-        return stored.programs;
-      }
-
-      const programs = await iptvService.getEpgDay(sessionId, channelId, date);
-      day.channels[channelId] = { at: Date.now(), programs };
-      this.saveDay(day);
-
-      return programs;
+    if (stored && this.isFresh(stored, date)) {
+      return stored.programs;
     }
 
-    const key = `${portal}:${channelId}:${date}`;
-    const cached = this.epgCache.get(key);
-
-    if (cached && Date.now() - cached.at < config.EPG_CACHE_TTL) {
-      return cached.programs;
+    if (!background) this.foreground++;
+    let programs;
+    try {
+      programs = await iptvService.getEpgDay(sessionId, channelId, date);
+    } finally {
+      if (!background) this.foreground--;
     }
 
-    const programs = await iptvService.getEpgDay(sessionId, channelId, date);
-
-    if (this.epgCache.size > 3000) {
-      this.epgCache.clear();
-    }
-    this.epgCache.set(key, { at: Date.now(), programs });
+    this.fetches++;
+    day.channels[channelId] = { at: Date.now(), programs };
+    this.saveDay(day);
 
     return programs;
   }

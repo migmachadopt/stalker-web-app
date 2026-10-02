@@ -637,14 +637,29 @@ class IPTVService {
     return js;
   }
 
-  // Key that identifies the portal, so cached catalogue pages can be shared
+  // Key that identifies the portal, so cached guide and catalogue data can be
+  // shared. It is the address the user configured: a redirector such as
+  // mag.cola.kim sends each connection to one of several servers, and those
+  // all serve the same portal.
   getPortalKey(sessionId) {
     const session = this.getSession(sessionId);
     if (!session) throw new Error('Invalid session');
+
+    const configured = session.configuredPortal || session.portalUrl;
+    try {
+      return new URL(/^https?:\/\//i.test(configured) ? configured : `http://${configured}`).host;
+    } catch (_) {
+      return configured;
+    }
+  }
+
+  // The server this session actually talks to (guide files were once stored under it)
+  getServerKey(sessionId) {
+    const session = this.getSession(sessionId);
     try {
       return new URL(session.portalUrl).host;
     } catch (_) {
-      return session.portalUrl;
+      return null;
     }
   }
 

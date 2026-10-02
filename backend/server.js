@@ -16,6 +16,7 @@ const vodService = require('./services/vodService');
 const subtitleService = require('./services/subtitleService');
 const recordingService = require('./services/recordingService');
 const settingsService = require('./services/settingsService');
+require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
