@@ -444,6 +444,52 @@ class StreamService {
     attach(firstResponse);
   }
 
+  // Save a provider file to disk with the same protection as playback: retries,
+  // a fresh link when needed, and the provider's closing clip removed.
+  // Returns { done: Promise<bytes>, cancel(), progress() }.
+  downloadToFile({ url, relink, name, username, userId }, filePath) {
+    const fs = require('fs');
+    const { EventEmitter } = require('events');
+
+    const token = encryption.generateStreamToken(userId, url, { id: 'recording', name, type: 'ARCHIVE' }, username);
+    token.archive = { relink, filename: name };
+
+    const control = new EventEmitter(); // stands in for the client connection
+    let total = 0;
+    let out = null;
+
+    const done = (async () => {
+      try {
+        total = await this.probeArchiveSize(url);
+      } catch (error) {
+        total = await this.probeArchiveSize(await this.relinkArchive(token));
+      }
+      token.archive.totalBytes = total;
+
+      const first = await this.openFile(token, 0, total - 1);
+
+      return new Promise((resolve, reject) => {
+        out = fs.createWriteStream(filePath);
+        let finished = false;
+
+        out.on('finish', () => { finished = true; resolve(total); });
+        out.on('close', () => { if (!finished) reject(new Error('Download interrupted')); });
+        out.on('error', (error) => reject(error));
+
+        this.pipeFile(token, control, out, first, 0, total - 1);
+      });
+    })();
+
+    return {
+      done,
+      progress: () => ({ total, written: out ? out.bytesWritten : 0 }),
+      cancel: () => {
+        control.emit('close');
+        if (out) out.destroy();
+      }
+    };
+  }
+
   // Subtitle lines gathered so far for a file token, from line number `after`
   getCues(tokenId, after = 0) {
     const token = this.streamTokens.get(tokenId);

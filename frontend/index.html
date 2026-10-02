@@ -89,6 +89,9 @@
       refresh: <React.Fragment><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></React.Fragment>,
       rewind: <React.Fragment><polygon points="11 19 2 12 11 5 11 19" /><polygon points="22 19 13 12 22 5 22 19" /></React.Fragment>,
       cc: <React.Fragment><rect x="2" y="5" width="20" height="14" rx="3" /><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M17 10.2a2.2 2.2 0 1 0 0 3.6" /></React.Fragment>,
+      box: <React.Fragment><polyline points="21 8 21 21 3 21 3 8" /><rect x="1" y="3" width="22" height="5" rx="1" /><line x1="10" y1="12" x2="14" y2="12" /></React.Fragment>,
+      scissors: <React.Fragment><circle cx="6" cy="6" r="3" /><circle cx="6" cy="18" r="3" /><line x1="20" y1="4" x2="8.12" y2="15.88" /><line x1="14.47" y1="14.48" x2="20" y2="20" /><line x1="8.12" y1="8.12" x2="12" y2="12" /></React.Fragment>,
+      trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>
     };
 
@@ -1134,7 +1137,7 @@
     const GUIDE_CHANNEL_WIDTH = 210;
     const CHANNEL_LOGO_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%231a1a2e" width="100" height="100"/><text x="50" y="55" text-anchor="middle" fill="%23667eea" font-size="30">TV</text></svg>';
 
-    function GuideBrowser({ channels, genres, onPlay, onDownload, onWatchLive }) {
+    function GuideBrowser({ channels, genres, onPlay, onDownload, onSave, onWatchLive }) {
       const pad2 = (n) => String(n).padStart(2, '0');
       const localDate = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
       const clockTime = (ts) => { const d = new Date(ts * 1000); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
@@ -1147,6 +1150,7 @@
       const [now, setNow] = useState(Date.now());
       const [busy, setBusy] = useState(false);
       const [actionError, setActionError] = useState('');
+      const [actionNote, setActionNote] = useState('');
       const scrollRef = useRef(null);
       const queueRef = useRef([]);
       const runningRef = useRef(0);
@@ -1359,6 +1363,7 @@
       // `day` is the guide day the programme was listed under (needed to play it)
       const openProgram = (channel, program, day = date) => {
         setActionError('');
+        setActionNote('');
         setSelected({ channel, program, date: day });
       };
 
@@ -1603,6 +1608,19 @@
                           <Icon name="download" size={16} /> Download
                         </button>
                       )}
+                      {canPlaySelected && selectedState !== 'live' && (
+                        <button
+                          className="vod-secondary"
+                          disabled={busy}
+                          title="Download to the server, mark start and end, and convert to MP4"
+                          onClick={() => run(async () => {
+                            await onSave(selected.channel, selected.date, selected.program);
+                            setActionNote('Added to the library. Open Library in the menu to follow it.');
+                          })}
+                        >
+                          <Icon name="box" size={16} /> Save to library
+                        </button>
+                      )}
                       {selectedState === 'live' && (
                         <button className="vod-secondary" onClick={() => onWatchLive(selected.channel)}><span className="live-dot"></span> Watch live</button>
                       )}
@@ -1616,7 +1634,311 @@
                   </div>
                 </div>
                 {actionError && <div className="error-msg">{actionError}</div>}
+                {actionNote && <div className="success-msg">{actionNote}</div>}
               </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // LIBRARY - recordings saved on the server, trimmed and converted to MP4
+    // ═══════════════════════════════════════════════════════════════════════
+
+    const formatBytes = (bytes) => {
+      if (!bytes) return '';
+      return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round(bytes / 1e6)} MB`;
+    };
+
+    const formatLength = (seconds) => {
+      const s = Math.max(0, Math.round(seconds || 0));
+      const h = Math.floor(s / 3600);
+      const pad = (n) => String(n).padStart(2, '0');
+      return h > 0 ? `${h}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}` : `${Math.floor(s / 60)}:${pad(s % 60)}`;
+    };
+
+    // Mark where the programme starts and ends, looking at frames of the recording
+    function CutEditor({ job, onClose, onQueued }) {
+      const length = Math.floor(job.duration);
+      const [start, setStart] = useState(job.cutStart || 0);
+      const [end, setEnd] = useState(job.cutEnd || length);
+      const [frames, setFrames] = useState({ start: null, end: null });
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState(job.error || '');
+
+      // The frame under each marker, fetched a moment after the marker stops moving
+      const useFrame = (side, second) => {
+        useEffect(() => {
+          let cancelled = false;
+          const timer = setTimeout(async () => {
+            try {
+              const url = await api.recordingFrame(job.id, second);
+              if (cancelled) { URL.revokeObjectURL(url); return; }
+              setFrames(prev => {
+                if (prev[side]) URL.revokeObjectURL(prev[side]);
+                return { ...prev, [side]: url };
+              });
+            } catch (err) {
+              if (!cancelled) setFrames(prev => ({ ...prev, [side]: null }));
+            }
+          }, 250);
+          return () => { cancelled = true; clearTimeout(timer); };
+        }, [second]);
+      };
+
+      useFrame('start', start);
+      useFrame('end', Math.max(0, end - 1)); // the last second that is kept
+
+      const clamp = (value) => Math.min(Math.max(0, Math.round(value)), length);
+      const moveStart = (value) => setStart(Math.min(clamp(value), end - 5));
+      const moveEnd = (value) => setEnd(Math.max(clamp(value), start + 5));
+
+      const submit = async () => {
+        setBusy(true);
+        setError('');
+        try {
+          const data = await api.recordingCut(job.id, start, end);
+          if (!data.success) throw new Error(data.error || 'Could not queue the conversion');
+          onQueued();
+        } catch (err) {
+          setError(err.message);
+          setBusy(false);
+        }
+      };
+
+      const marker = (side, label, value, move) => (
+        <div className="cut-side">
+          <div className="cut-frame">
+            {frames[side] ? <img src={frames[side]} alt="" /> : <div className="cut-frame-wait">Loading frame...</div>}
+            <span className="cut-label">{label} · {formatLength(value)}</span>
+          </div>
+          <input
+            type="range"
+            className="pc-seek cut-slider"
+            min="0"
+            max={length}
+            step="1"
+            value={value}
+            style={{ '--progress': `${(value / length) * 100}%` }}
+            onChange={(e) => move(Number(e.target.value))}
+          />
+          <div className="cut-steps">
+            {[-60, -10, -1, 1, 10, 60].map(step => (
+              <button key={step} type="button" onClick={() => move(value + step)}>
+                {step > 0 ? '+' : '−'}{Math.abs(step) >= 60 ? `${Math.abs(step) / 60} min` : `${Math.abs(step)} s`}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+
+      return (
+        <div className="modal-overlay" onClick={onClose}>
+          <div className="modal cut-editor" onClick={e => e.stopPropagation()}>
+            <button className="vod-close" onClick={onClose} title="Close"><Icon name="x" size={18} /></button>
+            <h2>{job.title}</h2>
+            <p className="cut-hint">
+              Move each marker until its picture shows the first and the last moment you want to keep.
+            </p>
+
+            <div className="cut-sides">
+              {marker('start', 'Start', start, moveStart)}
+              {marker('end', 'End', end, moveEnd)}
+            </div>
+
+            {error && <div className="error-msg">{error}</div>}
+
+            <div className="cut-footer">
+              <span>Result: {formatLength(end - start)} of {formatLength(length)}</span>
+              <button className="vod-secondary" onClick={onClose}>Cancel</button>
+              <button className="vod-play" disabled={busy} onClick={submit}>
+                <Icon name="scissors" size={16} /> Convert to MP4
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function LibraryBrowser() {
+      const [data, setData] = useState(null);       // { recordings, ffmpeg, freeBytes }
+      const [error, setError] = useState('');
+      const [editing, setEditing] = useState(null);
+      const [playing, setPlaying] = useState(null); // { title, subtitle, url }
+      const videoRef = useRef(null);
+
+      const refresh = async () => {
+        try {
+          const result = await api.recordings();
+          if (!result.success) throw new Error(result.error || 'Could not load the library');
+          setData(result);
+          setError('');
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      // Progress is followed while the library is open
+      useEffect(() => {
+        refresh();
+        const timer = setInterval(refresh, 3000);
+        return () => clearInterval(timer);
+      }, []);
+
+      const act = async (action, confirmText) => {
+        if (confirmText && !confirm(confirmText)) return;
+        try {
+          const result = await action();
+          if (result && result.success === false) throw new Error(result.error);
+        } catch (err) {
+          setError(err.message || 'Action failed');
+        }
+        refresh();
+      };
+
+      const media = async (job) => {
+        const ticket = await api.recordingTicket(job.id);
+        if (!ticket.success) throw new Error(ticket.error || 'Recording not available');
+        return `${BACKEND_ORIGIN}${ticket.url}`;
+      };
+
+      const play = (job) => act(async () => {
+        setPlaying({ title: job.title, subtitle: job.channelName, url: await media(job) });
+      });
+
+      const download = (job) => act(async () => {
+        const link = document.createElement('a');
+        link.href = `${await media(job)}?download=1`;
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      });
+
+      const closePlayer = () => {
+        const video = videoRef.current;
+        if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+        if (document.fullscreenElement) document.exitFullscreen();
+        setPlaying(null);
+      };
+
+      const recordings = data ? data.recordings : [];
+      const groups = [
+        { title: 'Downloading to the server', states: ['downloading', 'queued'] },
+        { title: 'Waiting for you to mark start and end', states: ['ready'] },
+        { title: 'Converting to MP4', states: ['converting', 'waiting'] },
+        { title: 'Finished', states: ['done'] },
+        { title: 'Failed', states: ['failed'] }
+      ].map(group => ({
+        ...group,
+        // The one being worked on first, then the ones waiting their turn
+        items: recordings
+          .filter(job => group.states.includes(job.state))
+          .sort((a, b) => group.states.indexOf(a.state) - group.states.indexOf(b.state))
+      })).filter(group => group.items.length);
+
+      const describe = (job) => {
+        switch (job.state) {
+          case 'queued': return 'Waiting for its turn to download';
+          case 'downloading': return `Downloading ${job.progress}%${job.sourceBytes ? ` of ${formatBytes(job.sourceBytes)}` : ''}`;
+          case 'ready': return `${formatLength(job.duration)} downloaded${job.sourceBytes ? ` · ${formatBytes(job.sourceBytes)}` : ''}`;
+          case 'waiting': return `Waiting for its turn to convert · ${formatLength(job.cutEnd - job.cutStart)}`;
+          case 'converting': return `Converting ${job.progress}% · ${formatLength(job.cutEnd - job.cutStart)}`;
+          case 'done': return `${formatLength(job.outputDuration)} · ${formatBytes(job.outputBytes)} · MP4`;
+          default: return job.error || 'Failed';
+        }
+      };
+
+      return (
+        <div className="vod-browser guide">
+          <div className="vod-topbar">
+            <h2>Library</h2>
+            {data && data.freeBytes !== null && (
+              <span className="library-free">{formatBytes(data.freeBytes)} free on the server</span>
+            )}
+          </div>
+
+          <div className="library-scroll">
+            {error && <div className="vod-message"><div className="error-msg">{error}</div></div>}
+            {data && !data.ffmpeg && (
+              <div className="vod-message"><div className="error-msg">
+                ffmpeg is not installed on the server, so recordings cannot be previewed or converted.
+              </div></div>
+            )}
+
+            {data && recordings.length === 0 && (
+              <div className="vod-message">
+                Nothing here yet. In Recordings, open a programme and choose "Save to library" to keep it as an MP4.
+              </div>
+            )}
+
+            {groups.map(group => (
+              <div key={group.title} className="library-group">
+                <h3>{group.title}</h3>
+                {group.items.map(job => (
+                  <div key={job.id} className={`library-item ${job.state}`}>
+                    <img
+                      src={job.channelLogo || CHANNEL_LOGO_FALLBACK}
+                      alt=""
+                      onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }}
+                    />
+                    <div className="library-text">
+                      <div className="library-title">{job.title}</div>
+                      <div className="library-sub">{job.channelName} · {describe(job)}</div>
+                      {job.state === 'ready' && job.error && <div className="library-error">{job.error}</div>}
+                      {(job.state === 'downloading' || job.state === 'converting') && (
+                        <div className="library-progress"><span style={{ width: `${job.progress}%` }}></span></div>
+                      )}
+                    </div>
+                    <div className="library-actions">
+                      {job.state === 'ready' && (
+                        <button className="vod-play" onClick={() => setEditing(job)}><Icon name="scissors" size={15} /> Mark start and end</button>
+                      )}
+                      {job.state === 'done' && (
+                        <React.Fragment>
+                          <button className="vod-play" onClick={() => play(job)}><Icon name="play" size={15} filled /> Play</button>
+                          <button className="library-icon" title="Download the MP4" onClick={() => download(job)}><Icon name="download" size={16} /></button>
+                        </React.Fragment>
+                      )}
+                      {job.state === 'failed' && (
+                        <button className="vod-secondary" onClick={() => act(() => api.recordingRetry(job.id))}>Try again</button>
+                      )}
+                      {(job.state === 'converting' || job.state === 'waiting') && (
+                        <button className="vod-secondary" onClick={() => act(() => api.recordingCancel(job.id))}>Stop</button>
+                      )}
+                      <button
+                        className="library-icon"
+                        title={job.state === 'downloading' || job.state === 'queued' ? 'Cancel' : 'Delete'}
+                        onClick={() => act(() => api.recordingRemove(job.id), `Delete "${job.title}" from the library?`)}
+                      >
+                        <Icon name="trash" size={16} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {editing && (
+            <CutEditor
+              job={editing}
+              onClose={() => setEditing(null)}
+              onQueued={() => { setEditing(null); refresh(); }}
+            />
+          )}
+
+          {playing && (
+            <div className="vod-player">
+              <video key={playing.url} ref={videoRef} src={playing.url} autoPlay playsInline />
+              <PlayerControls
+                key={playing.url}
+                videoRef={videoRef}
+                title={playing.title}
+                subtitle={playing.subtitle}
+                onClose={closePlayer}
+              />
             </div>
           )}
         </div>
@@ -1668,6 +1990,7 @@
       const [archiveLoading, setArchiveLoading] = useState(false);
       const [archiveError, setArchiveError] = useState('');
       const [archiveInfoId, setArchiveInfoId] = useState(null); // programme whose description is open
+      const [archiveNote, setArchiveNote] = useState('');
       const [intervalFrom, setIntervalFrom] = useState('20:00');
       const [intervalTo, setIntervalTo] = useState('21:00');
       
@@ -2196,6 +2519,7 @@
       const loadArchiveDay = async (channel, date) => {
         setArchiveDate(date);
         setArchiveInfoId(null);
+        setArchiveNote('');
         setArchivePrograms([]);
         setArchiveError('');
         setArchiveLoading(true);
@@ -2252,6 +2576,22 @@
           });
           setArchiveChannel(null);
           loadArchiveStream(data.streamUrl, 0);
+        } catch (err) {
+          setArchiveError(err.message);
+        }
+      };
+
+      const saveArchiveProgram = async (program) => {
+        setArchiveError('');
+        setArchiveNote('');
+        try {
+          const data = await api.recordingAdd(archiveChannel.id, {
+            date: archiveDate,
+            ...programWindow(program),
+            ...withDownloadMargin(program)
+          });
+          if (!data.success) throw new Error(data.error || 'Could not save to the library');
+          setArchiveNote(`"${program.name}" added to the library.`);
         } catch (err) {
           setArchiveError(err.message);
         }
@@ -2453,6 +2793,12 @@
           await new Promise(resolve => setTimeout(resolve, 50));
         }
         loadArchiveStream(data.streamUrl, 0);
+      };
+
+      // Keep a programme on the server to trim and convert to MP4 (see Library)
+      const saveGuideProgram = async (channel, date, program) => {
+        const data = await api.recordingAdd(channel.id, { ...guideWindow(date, program), ...withDownloadMargin(program) });
+        if (!data.success) throw new Error(data.error || 'Could not save to the library');
       };
 
       const downloadGuideProgram = async (channel, date, program) => {
@@ -2668,6 +3014,7 @@
           <div className="nav-rail">
             <div className={`nav-item ${section === 'tv' ? 'active' : ''}`} title="TV Channels" onClick={() => switchSection('tv')}><Icon name="tv" /></div>
             <div className={`nav-item ${section === 'guide' ? 'active' : ''}`} title="Recordings" onClick={() => switchSection('guide')}><Icon name="calendar" /></div>
+            <div className={`nav-item ${section === 'library' ? 'active' : ''}`} title="Library" onClick={() => switchSection('library')}><Icon name="box" /></div>
             {user?.sections?.vod && (
               <div className={`nav-item ${section === 'vod' ? 'active' : ''}`} title="Video Club" onClick={() => switchSection('vod')}><Icon name="film" /></div>
             )}
@@ -2685,6 +3032,8 @@
 
           {(section === 'vod' || section === 'series') && <VodBrowser key={section} type={section} />}
 
+          {section === 'library' && <LibraryBrowser />}
+
           {guideOpened && (
             <div className="section-host" style={{ display: section === 'guide' ? 'flex' : 'none' }}>
               <GuideBrowser
@@ -2692,6 +3041,7 @@
                 genres={genres}
                 onPlay={playGuideProgram}
                 onDownload={downloadGuideProgram}
+                onSave={saveGuideProgram}
                 onWatchLive={watchLiveFromGuide}
               />
             </div>
@@ -2913,6 +3263,7 @@
                 </div>
                 
                 {archiveError && <div className="error-msg">{archiveError}</div>}
+                {archiveNote && <div className="success-msg">{archiveNote}</div>}
                 
                 <div className="archive-programs">
                   {archiveLoading && <div className="archive-empty">Loading programme guide...</div>}
@@ -2939,6 +3290,7 @@
                             </button>
                             {available && <button type="button" title="Play" onClick={() => playArchiveProgram(program)}><Icon name="play" size={14} filled /></button>}
                             {available && <button type="button" title="Download" onClick={() => downloadArchiveProgram(program)}><Icon name="download" size={14} /></button>}
+                            {available && <button type="button" title="Save to library (trim and convert to MP4)" onClick={() => saveArchiveProgram(program)}><Icon name="box" size={14} /></button>}
                           </span>
                         </div>
                         {infoOpen && (

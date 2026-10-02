@@ -117,6 +117,45 @@ const api = {
     return this.iptvCall('/iptv/archive/stream', { channelId, ...window });
   },
   
+  // Library: recordings saved on the server, trimmed and converted to MP4
+  async recordings() {
+    return this.fetch('/recordings');
+  },
+  
+  // window: { date, programId, start?, duration?, title }
+  async recordingAdd(channelId, window) {
+    return this.fetch('/recordings', { method: 'POST', body: JSON.stringify({ channelId, ...window }) });
+  },
+  
+  async recordingCut(id, start, end) {
+    return this.fetch(`/recordings/${id}/cut`, { method: 'POST', body: JSON.stringify({ start, end }) });
+  },
+  
+  async recordingCancel(id) {
+    return this.fetch(`/recordings/${id}/cancel`, { method: 'POST' });
+  },
+  
+  async recordingRetry(id) {
+    return this.fetch(`/recordings/${id}/retry`, { method: 'POST' });
+  },
+  
+  async recordingRemove(id) {
+    return this.fetch(`/recordings/${id}`, { method: 'DELETE' });
+  },
+  
+  async recordingTicket(id) {
+    return this.fetch(`/recordings/${id}/ticket`, { method: 'POST' });
+  },
+  
+  // One frame of a downloaded recording, as an object URL for an <img>
+  async recordingFrame(id, seconds) {
+    const response = await fetch(`${API_URL}/recordings/${id}/frame?t=${Math.floor(seconds)}`, {
+      headers: { Authorization: `Bearer ${this.token}` }
+    });
+    if (!response.ok) throw new Error('Frame not available');
+    return URL.createObjectURL(await response.blob());
+  },
+  
   // Video club ('vod') and series ('series')
   async vodCategories(type) {
     return this.iptvCall('/iptv/vod/categories', { type });

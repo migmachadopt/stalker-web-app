@@ -35,6 +35,12 @@ module.exports = {
   ARCHIVE_MAX_WINDOW: 12 * 60 * 60, // 12 hours, in seconds
   FILE_HOLD_BYTES: 1536 * 1024, // newest bytes held back to strip the provider's closing clip
 
+  // Library: recordings saved on the server and converted to MP4
+  RECORDINGS_DIR: process.env.RECORDINGS_DIR || require('path').join(__dirname, '..', 'data', 'recordings'),
+  RECORDINGS_MIN_FREE_BYTES: 3 * 1024 * 1024 * 1024, // refuse new recordings below 3 GB free
+  CONVERT_PRESET: process.env.CONVERT_PRESET || 'veryfast', // x264 speed/size trade-off
+  CONVERT_CRF: process.env.CONVERT_CRF || '20',             // x264 quality (lower is better)
+
   // Video club & series catalogue
   VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes
 

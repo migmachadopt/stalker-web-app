@@ -153,6 +153,15 @@ jobs:
           sudo -u iptv npm ci --production
           echo "✅ Dependencies installed"
 
+      - name: 🎞️ Ensure ffmpeg (library conversions)
+        run: |
+          if command -v ffmpeg > /dev/null 2>&1; then
+            echo "✅ ffmpeg present: $(ffmpeg -version | head -1)"
+          else
+            echo "📦 Installing ffmpeg..."
+            sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          fi
+
       - name: 🔐 Fix permissions
         run: |
           # Application files

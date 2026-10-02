@@ -147,3 +147,6 @@ backend/data/subtitles/
 
 # Stored programme guide
 backend/data/epg/
+
+# Library recordings
+backend/data/recordings/

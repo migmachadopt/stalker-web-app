@@ -14,6 +14,7 @@ const channelListService = require('./services/channelListService');
 const archiveService = require('./services/archiveService');
 const vodService = require('./services/vodService');
 const subtitleService = require('./services/subtitleService');
+const recordingService = require('./services/recordingService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -269,6 +270,7 @@ app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) =
       return res.status(400).json({ success: false, error: 'Cannot delete your own account' });
     }
     
+    recordingService.removeUser(id);
     userService.deleteUser(id);
     channelListService.remove(id);
 
@@ -836,6 +838,111 @@ app.post('/api/iptv/disconnect', authMiddleware, async (req, res) => {
   } catch (error) {
     res.status(500).json({ success: false, error: 'Disconnect failed' });
   }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 📼 LIBRARY - recordings saved on the server, trimmed and converted to MP4
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.get('/api/recordings', authMiddleware, (req, res) => {
+  res.json({ success: true, ...recordingService.status(), recordings: recordingService.list(req.user.userId) });
+});
+
+// Save a programme (or an interval of a channel) to the library
+app.post('/api/recordings', authMiddleware, (req, res) => {
+  try {
+    const { channelId, date, programId, start, duration, title } = req.body;
+    
+    const user = userService.findUserById(req.user.userId);
+    const channel = user && channelListService.findVisibleChannel(user, channelId);
+    
+    if (!channel) {
+      return res.status(403).json({ success: false, error: 'Channel not available' });
+    }
+    
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date)) || !programId) {
+      return res.status(400).json({ success: false, error: 'Missing programme reference' });
+    }
+    
+    const recording = recordingService.add(user, channel, { date, programId, start, duration }, title);
+    
+    logger.logUserActivity(user.username, 'saved a recording to the library', { title: recording.title });
+    
+    res.json({ success: true, recording });
+    
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Frame of a downloaded recording, to mark where it starts and ends
+app.get('/api/recordings/:id/frame', authMiddleware, async (req, res) => {
+  try {
+    const image = await recordingService.frame(req.user.userId, req.params.id, req.query.t);
+    res.set('Content-Type', 'image/jpeg');
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(image);
+  } catch (error) {
+    res.status(404).json({ success: false, error: error.message });
+  }
+});
+
+// Start and end marked: queue the conversion to MP4
+app.post('/api/recordings/:id/cut', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, recording: recordingService.setCut(req.user.userId, req.params.id, req.body.start, req.body.end) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/recordings/:id/cancel', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, recording: recordingService.cancel(req.user.userId, req.params.id) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/recordings/:id/retry', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, recording: recordingService.retry(req.user.userId, req.params.id) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/recordings/:id', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, ...recordingService.remove(req.user.userId, req.params.id) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Temporary address of a finished recording, for the video player and downloads
+app.post('/api/recordings/:id/ticket', authMiddleware, (req, res) => {
+  try {
+    const ticket = recordingService.createTicket(req.user.userId, req.params.id);
+    res.json({ success: true, url: `/api/recordings/media/${ticket}` });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/recordings/media/:ticket', (req, res) => {
+  const media = recordingService.resolveTicket(req.params.ticket);
+  
+  if (!media) {
+    return res.status(401).send('Unauthorized');
+  }
+  
+  if (req.query.download === '1') {
+    return res.download(media.file, `${media.job.title.replace(/[\\/:*?"<>|]/g, ' ')}.mp4`);
+  }
+  
+  // sendFile answers range requests, so the player can seek
+  res.sendFile(media.file, { headers: { 'Content-Type': 'video/mp4' } });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
