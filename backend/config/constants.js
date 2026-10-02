@@ -38,6 +38,7 @@ module.exports = {
   // Library: recordings saved on the server and converted to MP4
   RECORDINGS_DIR: process.env.RECORDINGS_DIR || require('path').join(__dirname, '..', 'data', 'recordings'),
   RECORDINGS_MIN_FREE_BYTES: 3 * 1024 * 1024 * 1024, // refuse new recordings below 3 GB free
+  CUT_LEAD_SECONDS: 4, // decoded and dropped before a frame, to land on it exactly
   CONVERT_PRESET: process.env.CONVERT_PRESET || 'veryfast', // x264 speed/size trade-off
   CONVERT_CRF: process.env.CONVERT_CRF || '20',             // x264 quality (lower is better)
 

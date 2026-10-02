@@ -25,9 +25,12 @@ const iptvService = require('./iptvService');
 const archiveService = require('./archiveService');
 const channelListService = require('./channelListService');
 const streamService = require('./streamService');
+const settingsService = require('./settingsService');
 
-const DIR = config.RECORDINGS_DIR;
-const INDEX = path.join(DIR, 'library.json');
+// The list of recordings lives with the app data; the video files live in the
+// storage folder chosen in the admin area (see settingsService)
+const INDEX = path.join(config.DATA_DIR, 'library.json');
+const LEGACY_DIR = config.RECORDINGS_DIR; // where files were kept before folders could be chosen
 
 class RecordingService {
   constructor() {
@@ -47,8 +50,10 @@ class RecordingService {
   // ── Storage ──────────────────────────────────────────────────────────────
 
   load() {
+    const legacyIndex = path.join(LEGACY_DIR, 'library.json');
+
     try {
-      this.jobs = JSON.parse(fs.readFileSync(INDEX, 'utf8'));
+      this.jobs = JSON.parse(fs.readFileSync(fs.existsSync(INDEX) ? INDEX : legacyIndex, 'utf8'));
     } catch (_) {
       this.jobs = [];
     }
@@ -62,15 +67,31 @@ class RecordingService {
 
   save() {
     try {
-      fs.mkdirSync(DIR, { recursive: true });
+      fs.mkdirSync(path.dirname(INDEX), { recursive: true });
       fs.writeFileSync(INDEX, JSON.stringify(this.jobs, null, 1));
     } catch (error) {
       logger.error('data', 'Library could not be saved', { error: error.message });
     }
   }
 
-  sourcePath(job) { return path.join(DIR, `${job.id}.ts`); }
-  outputPath(job) { return path.join(DIR, `${job.id}.mp4`); }
+  // Each recording remembers where its files are, so changing the storage
+  // folder later does not lose the ones already made
+  sourcePath(job) { return job.sourceFile || path.join(LEGACY_DIR, `${job.id}.ts`); }
+  outputPath(job) { return job.outputFile || path.join(LEGACY_DIR, `${job.id}.mp4`); }
+  partialPath(job) { return path.join(settingsService.folders().temp, `${job.id}.mp4.part`); }
+
+  // A readable file name for the finished MP4, unique through the id
+  outputName(job) {
+    const safe = job.title.replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Recording';
+    return `${safe} [${job.id}].mp4`;
+  }
+
+  // The storage folder must be usable before anything is written to it
+  storage() {
+    const result = settingsService.check(settingsService.storageRoot());
+    if (!result.ok) throw new Error(`Storage folder not available: ${result.error}`);
+    return settingsService.folders();
+  }
 
   checkFfmpeg() {
     execFile('ffmpeg', ['-version'], (error) => {
@@ -80,13 +101,8 @@ class RecordingService {
   }
 
   freeBytes() {
-    try {
-      fs.mkdirSync(DIR, { recursive: true });
-      const stat = fs.statfsSync(DIR);
-      return stat.bavail * stat.bsize;
-    } catch (_) {
-      return null;
-    }
+    const result = settingsService.check(settingsService.storageRoot());
+    return result.ok ? result.freeBytes : null;
   }
 
   // ── Listing ──────────────────────────────────────────────────────────────
@@ -110,7 +126,12 @@ class RecordingService {
   }
 
   status() {
-    return { ffmpeg: this.ffmpeg !== false, freeBytes: this.freeBytes() };
+    const storage = settingsService.check(settingsService.storageRoot());
+    return {
+      ffmpeg: this.ffmpeg !== false,
+      freeBytes: storage.ok ? storage.freeBytes : null,
+      storageError: storage.ok ? '' : storage.error
+    };
   }
 
   // ── Adding ───────────────────────────────────────────────────────────────
@@ -200,7 +221,8 @@ class RecordingService {
       job.sourceStart = window.start;
       job.sourceDuration = window.duration;
 
-      fs.mkdirSync(DIR, { recursive: true });
+      job.sourceFile = path.join(this.storage().downloads, `${job.id}.ts`);
+      this.save();
 
       const handle = streamService.downloadToFile({
         url: window.url,
@@ -225,9 +247,11 @@ class RecordingService {
 
       if (job.state !== 'downloading') throw new Error('Cancelled');
 
-      job.duration = await this.probeDuration(this.sourcePath(job)) || job.sourceDuration;
+      const source = await this.probeSource(this.sourcePath(job));
+      job.duration = source.duration || job.sourceDuration;
+      job.fps = source.fps;
       job.cutStart = 0;
-      job.cutEnd = Math.floor(job.duration);
+      job.cutEnd = job.duration;
       job.state = 'ready';
       job.progress = 100;
       this.save();
@@ -242,39 +266,101 @@ class RecordingService {
     }
   }
 
-  probeDuration(file) {
+  // Length and frame rate of a downloaded recording
+  probeSource(file) {
     return new Promise(resolve => {
-      execFile('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], (error, stdout) => {
-        const seconds = Number(String(stdout).trim());
-        resolve(!error && Number.isFinite(seconds) && seconds > 0 ? seconds : 0);
+      execFile('ffprobe', [
+        '-v', 'error', '-select_streams', 'v:0',
+        '-show_entries', 'format=duration:stream=avg_frame_rate,r_frame_rate', '-of', 'json', file
+      ], (error, stdout) => {
+        let duration = 0;
+        let fps = 25;
+
+        try {
+          const info = JSON.parse(String(stdout));
+          duration = Number(info.format.duration) || 0;
+
+          const rate = (text) => {
+            const [n, d] = String(text || '').split('/').map(Number);
+            return n > 0 && d > 0 ? n / d : 0;
+          };
+          const stream = (info.streams || [])[0] || {};
+          const found = rate(stream.avg_frame_rate) || rate(stream.r_frame_rate);
+          if (found >= 10 && found <= 120) fps = found;
+        } catch (_) {
+          // keep the defaults
+        }
+
+        resolve({ duration, fps });
       });
     });
   }
 
+  // ffmpeg arguments that open the source positioned exactly at `seconds`.
+  // A recording can only be entered at a key picture, so reading starts a few
+  // seconds early and the pictures before the wanted one are decoded and
+  // dropped: what comes out first is the exact frame, not the next key picture.
+  seekArgs(job, seconds) {
+    const target = Math.max(0, seconds - 0.005); // a hair early, so that frame itself is kept
+    const lead = Math.min(target, config.CUT_LEAD_SECONDS);
+
+    return ['-ss', (target - lead).toFixed(3), '-i', this.sourcePath(job), '-ss', lead.toFixed(3)];
+  }
+
+  framesOf(job) {
+    const fps = job.fps || 25;
+    return { fps, count: Math.max(1, Math.floor(job.duration * fps)) };
+  }
+
   // ── Marking start and end ────────────────────────────────────────────────
 
-  // One frame of a downloaded recording, as a small JPEG. Frames are extracted
-  // one at a time and remembered, so dragging the markers stays light.
-  frame(userId, id, seconds) {
+  // Split a stream of JPEG images (each ends FF D9 and the next starts FF D8)
+  splitJpegs(buffer) {
+    const images = [];
+    let start = 0;
+
+    for (let i = 2; i + 3 < buffer.length; i++) {
+      if (buffer[i] === 0xff && buffer[i + 1] === 0xd9 && buffer[i + 2] === 0xff && buffer[i + 3] === 0xd8) {
+        images.push(buffer.subarray(start, i + 2));
+        start = i + 2;
+      }
+    }
+    if (start < buffer.length) images.push(buffer.subarray(start));
+
+    return images;
+  }
+
+  // One frame of a downloaded recording, by frame number, as a small JPEG.
+  // Finding a frame means decoding from the picture before it, so the whole
+  // second around it is extracted at once and remembered: stepping frame by
+  // frame within that second is then immediate.
+  frame(userId, id, index) {
     const job = this.find(userId, id);
     if (!['ready', 'waiting', 'converting'].includes(job.state)) throw new Error('Recording has no source to preview');
 
-    const second = Math.min(Math.max(0, Math.floor(Number(seconds) || 0)), Math.max(0, Math.floor(job.duration) - 1));
-    const key = `${id}:${second}`;
+    const { fps, count } = this.framesOf(job);
+    const wanted = Math.min(Math.max(0, Math.floor(Number(index) || 0)), count - 1);
+    const key = `${id}:${wanted}`;
     if (this.frames.has(key)) return Promise.resolve(this.frames.get(key));
+
+    const perBatch = Math.round(fps);
+    const first = Math.floor(wanted / perBatch) * perBatch;
 
     const task = this.frameQueue.then(() => new Promise((resolve, reject) => {
       if (this.frames.has(key)) return resolve(this.frames.get(key));
 
       execFile('ffmpeg', [
-        '-v', 'error', '-ss', String(second), '-i', this.sourcePath(job),
-        '-frames:v', '1', '-vf', 'yadif,scale=640:-2', '-q:v', '6', '-f', 'image2', 'pipe:1'
-      ], { encoding: 'buffer', maxBuffer: 4 * 1024 * 1024, timeout: 30000 }, (error, stdout) => {
+        '-v', 'error', ...this.seekArgs(job, first / fps),
+        '-frames:v', String(perBatch), '-vf', 'yadif,scale=640:-2', '-q:v', '6',
+        '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'
+      ], { encoding: 'buffer', maxBuffer: 48 * 1024 * 1024, timeout: 90000 }, (error, stdout) => {
         if (error || !stdout.length) return reject(new Error('Frame not available'));
 
-        if (this.frames.size > 300) this.frames.clear();
-        this.frames.set(key, stdout);
-        resolve(stdout);
+        if (this.frames.size > 750) this.frames.clear();
+        this.splitJpegs(stdout).forEach((image, i) => this.frames.set(`${id}:${first + i}`, image));
+
+        const image = this.frames.get(key);
+        return image ? resolve(image) : reject(new Error('Frame not available'));
       });
     }));
 
@@ -283,20 +369,22 @@ class RecordingService {
     return task;
   }
 
-  setCut(userId, id, start, end) {
+  // startFrame and endFrame are the first and the last frame to keep
+  setCut(userId, id, startFrame, endFrame) {
     const job = this.find(userId, id);
     if (job.state !== 'ready') throw new Error('This recording is not waiting to be marked');
     if (this.ffmpeg === false) throw new Error('ffmpeg is not installed on the server');
 
-    const from = Math.max(0, Math.floor(Number(start)));
-    const to = Math.min(Math.floor(job.duration), Math.floor(Number(end)));
+    const { fps, count } = this.framesOf(job);
+    const from = Math.max(0, Math.floor(Number(startFrame)));
+    const to = Math.min(count - 1, Math.floor(Number(endFrame)));
 
-    if (!Number.isFinite(from) || !Number.isFinite(to) || to - from < 5) {
-      throw new Error('The end must be at least 5 seconds after the start');
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to - from < fps) {
+      throw new Error('The end must be at least one second after the start');
     }
 
-    job.cutStart = from;
-    job.cutEnd = to;
+    job.cutStart = from / fps;
+    job.cutEnd = (to + 1) / fps;
     job.state = 'waiting';
     job.progress = 0;
     this.save();
@@ -309,8 +397,19 @@ class RecordingService {
 
   startConversion(job) {
     const length = job.cutEnd - job.cutStart;
-    const output = this.outputPath(job);
-    const partial = `${output}.part`;
+
+    let folders;
+    try {
+      folders = this.storage();
+    } catch (error) {
+      job.state = 'ready';
+      job.error = error.message;
+      this.save();
+      return;
+    }
+
+    const output = path.join(folders.library, this.outputName(job));
+    const partial = this.partialPath(job);
 
     job.state = 'converting';
     job.progress = 0;
@@ -321,7 +420,7 @@ class RecordingService {
     // `nice` keeps the rest of the server responsive while it runs.
     const child = spawn('nice', [
       '-n', '10', 'ffmpeg', '-v', 'error', '-y',
-      '-ss', String(job.cutStart), '-i', this.sourcePath(job), '-t', String(length),
+      ...this.seekArgs(job, job.cutStart), '-t', length.toFixed(3),
       '-vf', 'yadif',
       '-c:v', 'libx264', '-preset', config.CONVERT_PRESET, '-crf', config.CONVERT_CRF, '-pix_fmt', 'yuv420p',
       '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
@@ -352,6 +451,7 @@ class RecordingService {
         fs.rm(partial, { force: true }, () => {});
       } else if (code === 0 && fs.existsSync(partial)) {
         fs.renameSync(partial, output);
+        job.outputFile = output;
         job.state = 'done';
         job.progress = 100;
         job.outputBytes = fs.statSync(output).size;
@@ -422,7 +522,7 @@ class RecordingService {
     this.jobs = this.jobs.filter(j => j !== job);
     this.save();
 
-    for (const file of [this.sourcePath(job), this.outputPath(job), `${this.outputPath(job)}.part`]) {
+    for (const file of [this.sourcePath(job), this.outputPath(job), this.partialPath(job)]) {
       fs.rm(file, { force: true }, () => {});
     }
     for (const key of this.frames.keys()) {

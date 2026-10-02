@@ -100,6 +100,15 @@
     .checkbox-group { display: flex; align-items: center; gap: 10px; }
     .checkbox-group input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; }
     
+    /* Settings */
+    .settings-panel { max-width: 760px; }
+    .settings-body { padding: 20px; }
+    .settings-body code { background: #2a2a3e; padding: 1px 6px; border-radius: 4px; color: #ccc; }
+    .settings-status { margin-bottom: 20px; padding: 12px; border-radius: 8px; font-size: 0.9rem; }
+    .settings-status.ok { background: rgba(72, 187, 120, 0.15); color: #48bb78; }
+    .settings-status.bad { background: rgba(255, 100, 100, 0.15); color: #ff6464; }
+    .settings-foot { display: block; margin-top: 12px; color: #666; font-size: 0.8rem; }
+    
     /* Channel groups */
     .groups-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
     .groups-toolbar .meta { color: #888; font-size: 0.85rem; }
@@ -139,6 +148,12 @@
 
     function App() {
       const [user, setUser] = useState(null);
+      const [view, setView] = useState('users'); // 'users' | 'settings'
+      const [settings, setSettings] = useState(null);
+      const [storageRoot, setStorageRoot] = useState('');
+      const [settingsBusy, setSettingsBusy] = useState(false);
+      const [settingsError, setSettingsError] = useState('');
+      const [settingsNote, setSettingsNote] = useState('');
       const [loading, setLoading] = useState(true);
       const [users, setUsers] = useState([]);
       const [showModal, setShowModal] = useState(false);
@@ -358,6 +373,47 @@
         }
       };
 
+      const formatSize = (bytes) => bytes >= 1e12 ? `${(bytes / 1e12).toFixed(2)} TB` : `${(bytes / 1e9).toFixed(1)} GB`;
+
+      const loadSettings = async () => {
+        setSettingsError('');
+        setSettingsNote('');
+        const data = await api.fetch('/admin/settings');
+        if (data.success) {
+          setSettings(data);
+          setStorageRoot(data.folders.root);
+        } else {
+          setSettingsError(data.error || 'Could not load the settings');
+        }
+      };
+
+      const saveSettings = async (e) => {
+        e.preventDefault();
+        setSettingsBusy(true);
+        setSettingsError('');
+        setSettingsNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ storageRoot })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setStorageRoot(data.folders.root);
+          setSettingsNote('Saved. New recordings will be stored here.');
+        } catch (err) {
+          setSettingsError(err.message);
+        } finally {
+          setSettingsBusy(false);
+        }
+      };
+
+      const openView = (next) => (e) => {
+        e.preventDefault();
+        setView(next);
+        if (next === 'settings') loadSettings();
+      };
+
       if (loading) {
         return <div className="loading"><div className="spinner"></div>Loading...</div>;
       }
@@ -381,13 +437,65 @@
           <aside className="admin-sidebar">
             <h1>⚙️ Admin Panel</h1>
             <ul className="admin-nav">
-              <li><a href="#" className="active">👥 Users</a></li>
+              <li><a href="#" className={view === 'users' ? 'active' : ''} onClick={openView('users')}>👥 Users</a></li>
+              <li><a href="#" className={view === 'settings' ? 'active' : ''} onClick={openView('settings')}>⚙️ Settings</a></li>
               <li><a href="/">📺 Back to Player</a></li>
               <div className="divider"></div>
               <li><a href="#" onClick={() => { localStorage.removeItem('authToken'); window.location.href = '/'; }}>🚪 Logout</a></li>
             </ul>
           </aside>
           
+          {view === 'settings' && (
+            <main className="admin-main">
+              <div className="admin-header">
+                <h2>Settings</h2>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>💾 Storage</h3>
+                </div>
+                <form onSubmit={saveSettings} className="settings-body">
+                  <div className="form-group">
+                    <label>Storage folder for the library</label>
+                    <input
+                      type="text"
+                      value={storageRoot}
+                      onChange={e => setStorageRoot(e.target.value)}
+                      placeholder="/mnt/hdd/iptv"
+                      spellCheck="false"
+                    />
+                    <small>
+                      Full path of a folder that already exists, for example on the external disk.
+                      The app creates three folders inside it: <code>downloads</code> (recordings waiting to be trimmed),
+                      {' '}<code>library</code> (finished MP4 files) and <code>tmp</code> (conversions in progress).
+                      Leave empty to use the default ({settings?.defaultStorageRoot || 'next to the app data'}).
+                    </small>
+                  </div>
+
+                  {settings && (
+                    <div className={`settings-status ${settings.storage.ok ? 'ok' : 'bad'}`}>
+                      {settings.storage.ok
+                        ? `In use: ${settings.folders.root} · ${formatSize(settings.storage.freeBytes)} free of ${formatSize(settings.storage.totalBytes)}`
+                        : `Current folder not usable: ${settings.storage.error}`}
+                    </div>
+                  )}
+
+                  {settingsError && <div className="error-msg">{settingsError}</div>}
+                  {settingsNote && <div className="success-msg">{settingsNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={settingsBusy}>
+                    {settingsBusy ? 'Checking...' : 'Save'}
+                  </button>
+                  <small className="settings-foot">
+                    Recordings already made keep their files where they are; only new ones use the new folder.
+                  </small>
+                </form>
+              </div>
+            </main>
+          )}
+
+          {view === 'users' && (
           <main className="admin-main">
             <div className="admin-header">
               <h2>User Management</h2>
@@ -468,6 +576,7 @@
               </table>
             </div>
           </main>
+          )}
           
           {groupsUser && (
             <div className="modal-overlay" onClick={() => setGroupsUser(null)}>

@@ -4245,3 +4245,30 @@ video::cue {
   .library-item { flex-wrap: wrap; }
   .library-scroll { padding: 0 12px 20px; }
 }
+
+/* Frame-by-frame marking */
+.cut-side {
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+}
+
+.cut-side.active {
+  border-color: var(--accent-border);
+  background: var(--surface);
+}
+
+.cut-steps button {
+  flex: 1 1 22%;
+}
+
+.cut-steps button.fine {
+  background: var(--accent-subtle);
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.cut-steps button.fine:hover {
+  background: #fff;
+  color: #000;
+}

@@ -15,6 +15,7 @@ const archiveService = require('./services/archiveService');
 const vodService = require('./services/vodService');
 const subtitleService = require('./services/subtitleService');
 const recordingService = require('./services/recordingService');
+const settingsService = require('./services/settingsService');
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
 
@@ -309,6 +310,31 @@ app.get('/api/admin/users/:id', authMiddleware, adminMiddleware, (req, res) => {
     
   } catch (error) {
     res.status(500).json({ success: false, error: 'Failed to get user details' });
+  }
+});
+
+// Application settings (admin area)
+app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
+  const folders = settingsService.folders();
+  res.json({
+    success: true,
+    settings: settingsService.get(),
+    defaultStorageRoot: config.RECORDINGS_DIR,
+    folders,
+    storage: settingsService.check(folders.root)
+  });
+});
+
+app.put('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    const settings = settingsService.update({ storageRoot: req.body.storageRoot });
+    const folders = settingsService.folders();
+    
+    logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
+    
+    res.json({ success: true, settings, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
   }
 });
 
@@ -878,7 +904,7 @@ app.post('/api/recordings', authMiddleware, (req, res) => {
 // Frame of a downloaded recording, to mark where it starts and ends
 app.get('/api/recordings/:id/frame', authMiddleware, async (req, res) => {
   try {
-    const image = await recordingService.frame(req.user.userId, req.params.id, req.query.t);
+    const image = await recordingService.frame(req.user.userId, req.params.id, req.query.f);
     res.set('Content-Type', 'image/jpeg');
     res.set('Cache-Control', 'private, max-age=3600');
     res.send(image);
@@ -890,7 +916,7 @@ app.get('/api/recordings/:id/frame', authMiddleware, async (req, res) => {
 // Start and end marked: queue the conversion to MP4
 app.post('/api/recordings/:id/cut', authMiddleware, (req, res) => {
   try {
-    res.json({ success: true, recording: recordingService.setCut(req.user.userId, req.params.id, req.body.start, req.body.end) });
+    res.json({ success: true, recording: recordingService.setCut(req.user.userId, req.params.id, req.body.startFrame, req.body.endFrame) });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }

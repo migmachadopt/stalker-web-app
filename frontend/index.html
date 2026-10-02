@@ -1658,41 +1658,67 @@
       return h > 0 ? `${h}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}` : `${Math.floor(s / 60)}:${pad(s % 60)}`;
     };
 
-    // Mark where the programme starts and ends, looking at frames of the recording
+    // Mark where the programme starts and ends, frame by frame
     function CutEditor({ job, onClose, onQueued }) {
-      const length = Math.floor(job.duration);
-      const [start, setStart] = useState(job.cutStart || 0);
-      const [end, setEnd] = useState(job.cutEnd || length);
+      const fps = job.fps || 25;
+      const lastFrame = Math.max(1, Math.floor(job.duration * fps) - 1);
+      const toFrame = (seconds) => Math.round(seconds * fps);
+
+      // Both markers are frame numbers: the first and the last frame to keep
+      const [start, setStart] = useState(Math.min(toFrame(job.cutStart || 0), lastFrame - 1));
+      const [end, setEnd] = useState(Math.min(Math.max(toFrame(job.cutEnd || job.duration) - 1, 1), lastFrame));
+      const [active, setActive] = useState('start'); // marker moved by the arrow keys
       const [frames, setFrames] = useState({ start: null, end: null });
+      const [missing, setMissing] = useState({ start: false, end: false });
       const [busy, setBusy] = useState(false);
       const [error, setError] = useState(job.error || '');
 
-      // The frame under each marker, fetched a moment after the marker stops moving
-      const useFrame = (side, second) => {
+      // The picture under each marker, fetched a moment after it stops moving
+      const useFrame = (side, frame) => {
         useEffect(() => {
           let cancelled = false;
           const timer = setTimeout(async () => {
             try {
-              const url = await api.recordingFrame(job.id, second);
+              const url = await api.recordingFrame(job.id, frame);
               if (cancelled) { URL.revokeObjectURL(url); return; }
+              setMissing(prev => ({ ...prev, [side]: false }));
               setFrames(prev => {
                 if (prev[side]) URL.revokeObjectURL(prev[side]);
                 return { ...prev, [side]: url };
               });
             } catch (err) {
-              if (!cancelled) setFrames(prev => ({ ...prev, [side]: null }));
+              if (!cancelled) setMissing(prev => ({ ...prev, [side]: true }));
             }
-          }, 250);
+          }, 120);
           return () => { cancelled = true; clearTimeout(timer); };
-        }, [second]);
+        }, [frame]);
       };
 
       useFrame('start', start);
-      useFrame('end', Math.max(0, end - 1)); // the last second that is kept
+      useFrame('end', end);
 
-      const clamp = (value) => Math.min(Math.max(0, Math.round(value)), length);
-      const moveStart = (value) => setStart(Math.min(clamp(value), end - 5));
-      const moveEnd = (value) => setEnd(Math.max(clamp(value), start + 5));
+      const second = Math.round(fps);
+      const clamp = (value) => Math.min(Math.max(0, Math.round(value)), lastFrame);
+      const moveStart = (value) => setStart(Math.min(clamp(value), end - second));
+      const moveEnd = (value) => setEnd(Math.max(clamp(value), start + second));
+
+      // Arrow keys step the selected marker: one frame, or one second with Shift
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+          e.preventDefault();
+          const step = (e.key === 'ArrowRight' ? 1 : -1) * (e.shiftKey ? second : 1);
+          if (active === 'start') moveStart(start + step); else moveEnd(end + step);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      });
+
+      // m:ss plus the frame within that second
+      const timecode = (frame) => {
+        const whole = Math.floor(frame / fps);
+        return `${formatLength(whole)}.${String(Math.round(frame - whole * fps)).padStart(2, '0')}`;
+      };
 
       const submit = async () => {
         setBusy(true);
@@ -1707,26 +1733,33 @@
         }
       };
 
+      const steps = [
+        [-60 * second, '−1 min'], [-10 * second, '−10 s'], [-second, '−1 s'], [-1, '−1 frame'],
+        [1, '+1 frame'], [second, '+1 s'], [10 * second, '+10 s'], [60 * second, '+1 min']
+      ];
+
       const marker = (side, label, value, move) => (
-        <div className="cut-side">
+        <div className={`cut-side ${active === side ? 'active' : ''}`} onMouseDown={() => setActive(side)}>
           <div className="cut-frame">
-            {frames[side] ? <img src={frames[side]} alt="" /> : <div className="cut-frame-wait">Loading frame...</div>}
-            <span className="cut-label">{label} · {formatLength(value)}</span>
+            {frames[side] && <img src={frames[side]} alt="" />}
+            {!frames[side] && <div className="cut-frame-wait">{missing[side] ? 'No picture at this point' : 'Loading frame...'}</div>}
+            <span className="cut-label">{label} · {timecode(value)}</span>
           </div>
           <input
             type="range"
             className="pc-seek cut-slider"
             min="0"
-            max={length}
+            max={lastFrame}
             step="1"
             value={value}
-            style={{ '--progress': `${(value / length) * 100}%` }}
+            style={{ '--progress': `${(value / lastFrame) * 100}%` }}
             onChange={(e) => move(Number(e.target.value))}
+            onKeyDown={(e) => { if (e.key.startsWith('Arrow')) e.preventDefault(); }}
           />
           <div className="cut-steps">
-            {[-60, -10, -1, 1, 10, 60].map(step => (
-              <button key={step} type="button" onClick={() => move(value + step)}>
-                {step > 0 ? '+' : '−'}{Math.abs(step) >= 60 ? `${Math.abs(step) / 60} min` : `${Math.abs(step)} s`}
+            {steps.map(([step, text]) => (
+              <button key={step} type="button" className={Math.abs(step) === 1 ? 'fine' : ''} onClick={() => move(value + step)}>
+                {text}
               </button>
             ))}
           </div>
@@ -1739,18 +1772,19 @@
             <button className="vod-close" onClick={onClose} title="Close"><Icon name="x" size={18} /></button>
             <h2>{job.title}</h2>
             <p className="cut-hint">
-              Move each marker until its picture shows the first and the last moment you want to keep.
+              Move each marker until its picture is the first and the last frame you want to keep.
+              The arrow keys move the selected marker one frame at a time (hold Shift for one second).
             </p>
 
             <div className="cut-sides">
-              {marker('start', 'Start', start, moveStart)}
-              {marker('end', 'End', end, moveEnd)}
+              {marker('start', 'First frame', start, moveStart)}
+              {marker('end', 'Last frame', end, moveEnd)}
             </div>
 
             {error && <div className="error-msg">{error}</div>}
 
             <div className="cut-footer">
-              <span>Result: {formatLength(end - start)} of {formatLength(length)}</span>
+              <span>Result: {timecode(end - start + 1)} of {formatLength(job.duration)} · {Math.round(fps * 100) / 100} frames per second</span>
               <button className="vod-secondary" onClick={onClose}>Cancel</button>
               <button className="vod-play" disabled={busy} onClick={submit}>
                 <Icon name="scissors" size={16} /> Convert to MP4
@@ -1861,6 +1895,11 @@
 
           <div className="library-scroll">
             {error && <div className="vod-message"><div className="error-msg">{error}</div></div>}
+            {data && data.storageError && (
+              <div className="vod-message"><div className="error-msg">
+                The storage folder is not available: {data.storageError}
+              </div></div>
+            )}
             {data && !data.ffmpeg && (
               <div className="vod-message"><div className="error-msg">
                 ffmpeg is not installed on the server, so recordings cannot be previewed or converted.

@@ -127,8 +127,9 @@ const api = {
     return this.fetch('/recordings', { method: 'POST', body: JSON.stringify({ channelId, ...window }) });
   },
   
-  async recordingCut(id, start, end) {
-    return this.fetch(`/recordings/${id}/cut`, { method: 'POST', body: JSON.stringify({ start, end }) });
+  // First and last frame to keep
+  async recordingCut(id, startFrame, endFrame) {
+    return this.fetch(`/recordings/${id}/cut`, { method: 'POST', body: JSON.stringify({ startFrame, endFrame }) });
   },
   
   async recordingCancel(id) {
@@ -147,9 +148,9 @@ const api = {
     return this.fetch(`/recordings/${id}/ticket`, { method: 'POST' });
   },
   
-  // One frame of a downloaded recording, as an object URL for an <img>
-  async recordingFrame(id, seconds) {
-    const response = await fetch(`${API_URL}/recordings/${id}/frame?t=${Math.floor(seconds)}`, {
+  // One frame of a downloaded recording (by frame number), as an object URL for an <img>
+  async recordingFrame(id, frame) {
+    const response = await fetch(`${API_URL}/recordings/${id}/frame?f=${Math.floor(frame)}`, {
       headers: { Authorization: `Bearer ${this.token}` }
     });
     if (!response.ok) throw new Error('Frame not available');
