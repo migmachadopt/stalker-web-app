@@ -10,6 +10,14 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"></script>
+  <!-- Google Cast (Chromecast): only does something in Chrome, on an https address -->
+  <script>
+    window.__onGCastApiAvailable = function (available) {
+      window.castApiAvailable = !!available;
+      window.dispatchEvent(new Event('castapi'));
+    };
+  </script>
+  <script async src="https://www.gstatic.com/cv/js/sender/v1/cast_sender.js?loadCastFramework=1"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -94,6 +102,7 @@
       trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>,
       down: <polyline points="6 9 12 15 18 9" />,
+      cast: <React.Fragment><path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><line x1="2" y1="20" x2="2.01" y2="20" /></React.Fragment>,
       link: <React.Fragment><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></React.Fragment>,
       external: <React.Fragment><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></React.Fragment>
     };
@@ -1827,6 +1836,101 @@
       );
     }
 
+    // Playing on a Chromecast. The Chromecast fetches the video itself, so it
+    // needs an address it can reach and a format it plays (MP4).
+    //   available  the browser can cast (Chrome, on https)
+    //   device     name of the Chromecast connected, or ''
+    //   loaded     a video is on the Chromecast; then title, paused, time, duration
+    function useCast() {
+      const [available, setAvailable] = useState(!!window.castApiAvailable);
+      const [, redraw] = useState(0);
+      const remote = useRef(null); // { player, controller }
+
+      useEffect(() => {
+        if (available) return;
+        const onApi = () => setAvailable(!!window.castApiAvailable);
+        window.addEventListener('castapi', onApi);
+        return () => window.removeEventListener('castapi', onApi);
+      }, [available]);
+
+      useEffect(() => {
+        if (!available) return;
+
+        cast.framework.CastContext.getInstance().setOptions({
+          receiverApplicationId: chrome.cast.media.DEFAULT_MEDIA_RECEIVER_APP_ID,
+          autoJoinPolicy: chrome.cast.AutoJoinPolicy.ORIGIN_SCOPED
+        });
+
+        const player = new cast.framework.RemotePlayer();
+        const controller = new cast.framework.RemotePlayerController(player);
+        const onChange = () => redraw(n => n + 1);
+        controller.addEventListener(cast.framework.RemotePlayerEventType.ANY_CHANGE, onChange);
+        remote.current = { player, controller };
+        onChange();
+
+        return () => {
+          controller.removeEventListener(cast.framework.RemotePlayerEventType.ANY_CHANGE, onChange);
+          remote.current = null;
+        };
+      }, [available]);
+
+      const player = remote.current && remote.current.player;
+      const controller = remote.current && remote.current.controller;
+      const connected = !!(player && player.isConnected);
+      const session = connected ? cast.framework.CastContext.getInstance().getCurrentSession() : null;
+
+      return {
+        available,
+        device: session ? session.getCastDevice().friendlyName : '',
+        loaded: connected && player.isMediaLoaded,
+        title: (connected && player.title) || '',
+        paused: connected && player.isPaused,
+        time: connected ? player.currentTime : 0,
+        duration: connected ? player.duration : 0,
+
+        // Asks which Chromecast to use (if none is connected) and plays there.
+        // Resolves to false when the viewer closes the list of devices.
+        async start({ url, title, subtitle, image, startAt }) {
+          const context = cast.framework.CastContext.getInstance();
+
+          if (!context.getCurrentSession()) {
+            try {
+              await context.requestSession();
+            } catch (code) {
+              if (code === 'cancel') return false;
+              throw new Error(`Could not connect to the Chromecast (${code})`);
+            }
+          }
+
+          const info = new chrome.cast.media.MediaInfo(url, 'video/mp4');
+          info.metadata = new chrome.cast.media.GenericMediaMetadata();
+          info.metadata.title = title;
+          info.metadata.subtitle = subtitle || '';
+          if (image) info.metadata.images = [new chrome.cast.Image(image)];
+
+          const request = new chrome.cast.media.LoadRequest(info);
+          request.currentTime = Math.max(0, Math.floor(startAt || 0));
+          request.autoplay = true;
+
+          const error = await context.getCurrentSession().loadMedia(request);
+          if (error) throw new Error(`The Chromecast could not play this video (${error})`);
+          return true;
+        },
+
+        toggle() { if (controller) controller.playOrPause(); },
+
+        seek(seconds) {
+          if (!controller) return;
+          player.currentTime = Math.max(0, Math.min(seconds, player.duration || seconds));
+          controller.seek();
+        },
+
+        stop() {
+          if (available) cast.framework.CastContext.getInstance().endCurrentSession(true);
+        }
+      };
+    }
+
     // Details of a recording in the library: the film or episode it is, read
     // from IMDb or TMDB through the link the user pastes
     function LibraryDetails({ job, onChanged }) {
@@ -1995,9 +2099,53 @@
         return `${BACKEND_ORIGIN}${ticket.url}`;
       };
 
+      // Where the browser left off when the Chromecast took over, and back
+      const resumeAt = useRef(0);
+      const castTime = useRef(0);
+      const castApi = useCast();
+      if (castApi.loaded) castTime.current = castApi.time;
+
       const play = (job) => act(async () => {
-        setPlaying({ title: job.title, subtitle: job.channelName, url: await media(job) });
+        const url = await media(job);
+        const item = {
+          title: job.title,
+          subtitle: job.metadata ? metadataLine(job.metadata) : job.channelName,
+          url,
+          // The Chromecast may be given the server's address on the home network
+          castUrl: data.castBase ? `${data.castBase}${new URL(url).pathname}` : url,
+          image: job.metadata ? metadataText(job.metadata).poster : ''
+        };
+        // Already connected to a Chromecast: it plays there straight away
+        if (castApi.device) await sendToCast(item, 0);
+        else setPlaying(item);
       });
+
+      // While the Chromecast has the video, the one in the browser is put away
+      const sendToCast = async (item, startAt) => {
+        resumeAt.current = startAt;
+        setPlaying({ ...item, casting: true });
+        let started = false;
+        try {
+          started = await castApi.start({ url: item.castUrl, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
+        } finally {
+          if (!started) setPlaying({ ...item, casting: false });
+        }
+      };
+
+      // The Chromecast stopped (here, or from the TV): continue in the browser
+      const wasCasting = useRef(false);
+      useEffect(() => {
+        if (wasCasting.current && !castApi.loaded) {
+          setPlaying(current => {
+            if (current) resumeAt.current = castTime.current;
+            return current && { ...current, casting: false };
+          });
+        }
+        wasCasting.current = castApi.loaded;
+      }, [castApi.loaded]);
+
+      const castPlaying = () => act(() => sendToCast(playing, videoRef.current ? videoRef.current.currentTime : 0));
+
 
       const download = (job) => act(async () => {
         const link = document.createElement('a');
@@ -2012,6 +2160,8 @@
         const video = videoRef.current;
         if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
         if (document.fullscreenElement) document.exitFullscreen();
+        if (castApi.loaded) castApi.stop();
+        resumeAt.current = 0;
         setPlaying(null);
       };
 
@@ -2136,16 +2286,64 @@
             />
           )}
 
-          {playing && (
+          {castApi.loaded && (
+            <div className="vod-player cast-remote">
+              <button className="cast-close" title="Stop and close" onClick={closePlayer}><Icon name="x" size={22} /></button>
+              {playing && playing.image && <img className="cast-poster" src={playing.image} alt="" />}
+              <div className="cast-device"><Icon name="cast" size={16} /> Playing on {castApi.device}</div>
+              <div className="cast-title">{playing ? playing.title : castApi.title}</div>
+              {playing && <div className="cast-subtitle">{playing.subtitle}</div>}
+              <input
+                className="cast-seek"
+                type="range"
+                min="0"
+                max={Math.max(1, Math.floor(castApi.duration))}
+                value={Math.floor(castApi.time)}
+                onChange={(e) => castApi.seek(Number(e.target.value))}
+              />
+              <div className="cast-time">{formatLength(castApi.time)} / {formatLength(castApi.duration)}</div>
+              <div className="cast-buttons">
+                <button className="pc-pill" onClick={() => castApi.seek(castApi.time - 10)}>−10 s</button>
+                <button className="cast-play" title={castApi.paused ? 'Play' : 'Pause'} onClick={castApi.toggle}>
+                  <Icon name={castApi.paused ? 'play' : 'pause'} size={26} filled />
+                </button>
+                <button className="pc-pill" onClick={() => castApi.seek(castApi.time + 30)}>+30 s</button>
+              </div>
+              {playing && <button className="vod-secondary cast-here" onClick={castApi.stop}>Play here instead</button>}
+            </div>
+          )}
+
+          {playing && playing.casting && !castApi.loaded && (
+            <div className="vod-player cast-remote">
+              <button className="cast-close" title="Close" onClick={closePlayer}><Icon name="x" size={22} /></button>
+              <div className="cast-device"><Icon name="cast" size={16} /> Connecting to the Chromecast…</div>
+              <div className="cast-title">{playing.title}</div>
+            </div>
+          )}
+
+          {playing && !playing.casting && !castApi.loaded && (
             <div className="vod-player">
-              <video key={playing.url} ref={videoRef} src={playing.url} autoPlay playsInline />
+              <video
+                key={playing.url}
+                ref={videoRef}
+                src={playing.url}
+                autoPlay
+                playsInline
+                onLoadedMetadata={(e) => {
+                  if (resumeAt.current) { e.currentTarget.currentTime = resumeAt.current; resumeAt.current = 0; }
+                }}
+              />
               <PlayerControls
                 key={playing.url}
                 videoRef={videoRef}
                 title={playing.title}
                 subtitle={playing.subtitle}
                 onClose={closePlayer}
-              />
+              >
+                {castApi.available && (
+                  <button className="pc-pill" title="Play on a Chromecast" onClick={castPlaying}><Icon name="cast" size={16} /> Cast</button>
+                )}
+              </PlayerControls>
             </div>
           )}
         </div>

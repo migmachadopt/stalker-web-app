@@ -156,6 +156,10 @@
       const [settingsBusy, setSettingsBusy] = useState(false);
       const [settingsError, setSettingsError] = useState('');
       const [settingsNote, setSettingsNote] = useState('');
+      const [castBase, setCastBase] = useState('');
+      const [castBusy, setCastBusy] = useState(false);
+      const [castError, setCastError] = useState('');
+      const [castNote, setCastNote] = useState('');
       const [tmdbKey, setTmdbKey] = useState('');
       const [tmdbBusy, setTmdbBusy] = useState(false);
       const [tmdbError, setTmdbError] = useState('');
@@ -388,6 +392,7 @@
         if (data.success) {
           setSettings(data);
           setStorageRoot(data.folders.root);
+          setCastBase(data.settings.castBaseUrl || '');
         } else {
           setSettingsError(data.error || 'Could not load the settings');
         }
@@ -411,6 +416,27 @@
           setSettingsError(err.message);
         } finally {
           setSettingsBusy(false);
+        }
+      };
+
+      const saveCastBase = async (e) => {
+        e.preventDefault();
+        setCastBusy(true);
+        setCastError('');
+        setCastNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ castBaseUrl: castBase })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setCastBase(data.settings.castBaseUrl || '');
+          setCastNote(data.settings.castBaseUrl ? 'Saved. The Chromecast will fetch videos from this address.' : 'Saved. The Chromecast will use the address the app is opened at.');
+        } catch (err) {
+          setCastError(err.message);
+        } finally {
+          setCastBusy(false);
         }
       };
 
@@ -517,6 +543,36 @@
                   <small className="settings-foot">
                     Recordings already made keep their files where they are; only new ones use the new folder.
                   </small>
+                </form>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>📺 Chromecast</h3>
+                </div>
+                <form onSubmit={saveCastBase} className="settings-body">
+                  <div className="form-group">
+                    <label>Address of this server on the home network</label>
+                    <input
+                      type="text"
+                      value={castBase}
+                      onChange={e => setCastBase(e.target.value)}
+                      placeholder="http://192.168.1.159"
+                      spellCheck="false"
+                    />
+                    <small>
+                      A Chromecast fetches the video by itself. With this address it gets it straight from the server
+                      at home; left empty, it uses the address the app is opened at, and the video travels through the internet.
+                      Use the IP address, not a name: a Chromecast does not know local names.
+                    </small>
+                  </div>
+
+                  {castError && <div className="error-msg">{castError}</div>}
+                  {castNote && <div className="success-msg">{castNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={castBusy}>
+                    {castBusy ? 'Saving...' : 'Save'}
+                  </button>
                 </form>
               </div>
 

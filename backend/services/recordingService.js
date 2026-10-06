@@ -130,7 +130,8 @@ class RecordingService {
     return {
       ffmpeg: this.ffmpeg !== false,
       freeBytes: storage.ok ? storage.freeBytes : null,
-      storageError: storage.ok ? '' : storage.error
+      storageError: storage.ok ? '' : storage.error,
+      castBase: settingsService.castBase()
     };
   }
 

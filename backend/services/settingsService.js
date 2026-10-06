@@ -11,6 +11,9 @@
 // The root itself must already exist: if it is on a disk that is not mounted,
 // nothing is written to the system card in its place.
 //
+// castBaseUrl: address of this server on the home network, given to a
+// Chromecast so videos do not travel through the internet address.
+//
 // tmdbKey: key for themoviedb.org, used to read film and episode details for
 // the library (see metadataService). It never leaves the server.
 
@@ -33,6 +36,11 @@ class SettingsService {
   get() {
     const { tmdbKey, ...shown } = this.settings;
     return { ...shown, tmdbKeySet: !!tmdbKey };
+  }
+
+  // Address the Chromecast uses to fetch videos ('' = the address the app was opened at)
+  castBase() {
+    return this.settings.castBaseUrl || '';
   }
 
   tmdbKey() {
@@ -109,6 +117,14 @@ class SettingsService {
       const result = this.check(root, true);
       if (!result.ok) throw new Error(result.error);
       next.storageRoot = root === config.RECORDINGS_DIR ? undefined : root;
+    }
+
+    if (patch.castBaseUrl !== undefined) {
+      const base = String(patch.castBaseUrl || '').trim().replace(/\/+$/, '');
+      if (base && !/^https?:\/\/[^\/\s]+$/i.test(base)) {
+        throw new Error('Use an address like http://192.168.1.159 (no path after it)');
+      }
+      next.castBaseUrl = base || undefined;
     }
 
     if (patch.tmdbKey !== undefined) {

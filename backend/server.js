@@ -329,12 +329,12 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
     
-    const settings = settingsService.update({ storageRoot, tmdbKey });
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
