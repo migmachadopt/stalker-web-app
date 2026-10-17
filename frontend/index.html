@@ -32,7 +32,7 @@
   <div id="root"></div>
   
   <script type="text/babel">
-    const { useState, useEffect, useRef } = React;
+    const { useState, useEffect, useRef, useMemo } = React;
     
     // Backend origin used for stream proxy (API_URL comes from api.js)
     const BACKEND_ORIGIN = new URL(API_URL, window.location.href).origin;
@@ -102,6 +102,7 @@
       trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>,
       down: <polyline points="6 9 12 15 18 9" />,
+      grid: <React.Fragment><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></React.Fragment>,
       cast: <React.Fragment><path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><line x1="2" y1="20" x2="2.01" y2="20" /></React.Fragment>,
       link: <React.Fragment><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></React.Fragment>,
       external: <React.Fragment><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></React.Fragment>
@@ -2050,12 +2051,512 @@
       );
     }
 
+    // Plays a finished recording, here or on a Chromecast, and remembers where
+    // the viewer stopped. Used by the Library and by the Recorded gallery.
+    //   play(job, castBase)  castBase: the server's address on the home network, if set
+    //   download(job)
+    //   view                 the player, to put in the page (null when closed)
+    function useRecordingPlayer() {
+      const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, image, casting }
+      const videoRef = useRef(null);
+      const lastSaved = useRef(0);
+
+      // Where the browser left off when the Chromecast took over, and back
+      const resumeAt = useRef(0);
+      const castTime = useRef(0);
+      const castApi = useCast();
+      if (castApi.loaded) castTime.current = castApi.time;
+
+      const media = async (job) => {
+        const ticket = await api.recordingTicket(job.id);
+        if (!ticket.success) throw new Error(ticket.error || 'Recording not available');
+        return `${BACKEND_ORIGIN}${ticket.url}`;
+      };
+
+      const play = async (job, castBase) => {
+        const url = await media(job);
+        const item = {
+          id: job.id,
+          ...recordingHeading(job),
+          url,
+          // The Chromecast may be given the server's address on the home network
+          castUrl: castBase ? `${castBase}${new URL(url).pathname}` : url,
+          image: job.metadata ? metadataText(job.metadata).poster : ''
+        };
+        // Already connected to a Chromecast: it plays there straight away
+        if (castApi.device) await sendToCast(item, savedRecordingPosition(job.id));
+        else setPlaying(item);
+      };
+
+      // While the Chromecast has the video, the one in the browser is put away
+      const sendToCast = async (item, startAt) => {
+        resumeAt.current = startAt;
+        setPlaying({ ...item, casting: true });
+        let started = false;
+        try {
+          started = await castApi.start({ url: item.castUrl, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
+        } finally {
+          if (!started) setPlaying({ ...item, casting: false });
+        }
+      };
+
+      // The Chromecast stopped (here, or from the TV): continue in the browser
+      const wasCasting = useRef(false);
+      useEffect(() => {
+        if (wasCasting.current && !castApi.loaded) {
+          setPlaying(current => {
+            if (current) resumeAt.current = castTime.current;
+            return current && { ...current, casting: false };
+          });
+        }
+        wasCasting.current = castApi.loaded;
+      }, [castApi.loaded]);
+
+      // The position on the Chromecast is remembered too
+      useEffect(() => {
+        if (castApi.loaded && playing) saveRecordingPosition(playing.id, castApi.time, castApi.duration);
+      }, [castApi.loaded && Math.floor(castApi.time / 5)]);
+
+      const castPlaying = async () => {
+        try {
+          await sendToCast(playing, videoRef.current ? videoRef.current.currentTime : 0);
+        } catch (err) {
+          alert(err.message);
+        }
+      };
+
+      const download = async (job) => {
+        const link = document.createElement('a');
+        link.href = `${await media(job)}?download=1`;
+        link.download = '';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+      };
+
+      const closePlayer = () => {
+        const video = videoRef.current;
+        if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
+        if (document.fullscreenElement) document.exitFullscreen();
+        if (castApi.loaded) castApi.stop();
+        resumeAt.current = 0;
+        setPlaying(null);
+      };
+
+      // Continue where the viewer left off (or where the Chromecast was)
+      const handleLoadedMetadata = (e) => {
+        const video = e.currentTarget;
+        const at = resumeAt.current || savedRecordingPosition(playing.id);
+        resumeAt.current = 0;
+        if (at > 0 && (!isFinite(video.duration) || at < video.duration - 60)) video.currentTime = at;
+      };
+
+      const handleTimeUpdate = (e) => {
+        const video = e.currentTarget;
+        if (Math.abs(video.currentTime - lastSaved.current) < 5) return;
+        lastSaved.current = video.currentTime;
+        saveRecordingPosition(playing.id, video.currentTime, video.duration);
+      };
+
+      const view = (
+        <React.Fragment>
+          {castApi.loaded && (
+            <div className="vod-player cast-remote">
+              <button className="cast-close" title="Stop and close" onClick={closePlayer}><Icon name="x" size={22} /></button>
+              {playing && playing.image && <img className="cast-poster" src={playing.image} alt="" />}
+              <div className="cast-device"><Icon name="cast" size={16} /> Playing on {castApi.device}</div>
+              <div className="cast-title">{playing ? playing.title : castApi.title}</div>
+              {playing && <div className="cast-subtitle">{playing.subtitle}</div>}
+              <input
+                className="cast-seek"
+                type="range"
+                min="0"
+                max={Math.max(1, Math.floor(castApi.duration))}
+                value={Math.floor(castApi.time)}
+                onChange={(e) => castApi.seek(Number(e.target.value))}
+              />
+              <div className="cast-time">{formatLength(castApi.time)} / {formatLength(castApi.duration)}</div>
+              <div className="cast-buttons">
+                <button className="pc-pill" onClick={() => castApi.seek(castApi.time - 10)}>−10 s</button>
+                <button className="cast-play" title={castApi.paused ? 'Play' : 'Pause'} onClick={castApi.toggle}>
+                  <Icon name={castApi.paused ? 'play' : 'pause'} size={26} filled />
+                </button>
+                <button className="pc-pill" onClick={() => castApi.seek(castApi.time + 30)}>+30 s</button>
+              </div>
+              {playing && <button className="vod-secondary cast-here" onClick={castApi.stop}>Play here instead</button>}
+            </div>
+          )}
+
+          {playing && playing.casting && !castApi.loaded && (
+            <div className="vod-player cast-remote">
+              <button className="cast-close" title="Close" onClick={closePlayer}><Icon name="x" size={22} /></button>
+              <div className="cast-device"><Icon name="cast" size={16} /> Connecting to the Chromecast…</div>
+              <div className="cast-title">{playing.title}</div>
+            </div>
+          )}
+
+          {playing && !playing.casting && !castApi.loaded && (
+            <div className="vod-player">
+              <video
+                key={playing.url}
+                ref={videoRef}
+                src={playing.url}
+                autoPlay
+                playsInline
+                onLoadedMetadata={handleLoadedMetadata}
+                onTimeUpdate={handleTimeUpdate}
+              />
+              <PlayerControls
+                key={playing.url}
+                videoRef={videoRef}
+                title={playing.title}
+                subtitle={playing.subtitle}
+                onClose={closePlayer}
+              >
+                {castApi.available && (
+                  <button className="pc-pill" title="Play on a Chromecast" onClick={castPlaying}><Icon name="cast" size={16} /> Cast</button>
+                )}
+              </PlayerControls>
+            </div>
+          )}
+        </React.Fragment>
+      );
+
+      return { play, download, playing, view };
+    }
+
+    // Position reached in each recording (seconds), kept in this browser
+    function savedRecordingPosition(id) {
+      try { return Number(localStorage.getItem(`rec:pos:${id}`)) || 0; } catch (_) { return 0; }
+    }
+
+    function saveRecordingPosition(id, position, duration) {
+      try {
+        const finished = isFinite(duration) && duration > 0 && position > duration - 90;
+        if (finished || position < 30) localStorage.removeItem(`rec:pos:${id}`);
+        else localStorage.setItem(`rec:pos:${id}`, String(Math.floor(position)));
+      } catch (_) {}
+    }
+
+    // Title and second line of a recording: the film or the series and episode
+    // when it is linked, otherwise the programme as recorded
+    function recordingHeading(job) {
+      const metadata = job.metadata;
+      if (!metadata) return { title: job.title, subtitle: job.channelName };
+
+      const text = metadataText(metadata);
+      if (metadata.kind === 'episode') {
+        const number = metadata.season ? `S${metadata.season} E${metadata.episode}` : '';
+        return {
+          title: text.showTitle || text.title || job.title,
+          subtitle: [number, text.showTitle ? text.title : ''].filter(Boolean).join(' · ') || job.channelName
+        };
+      }
+      return { title: text.title || job.title, subtitle: [metadata.year, job.channelName].filter(Boolean).join(' · ') };
+    }
+
+    // Name of the programme a recording came from, without the date and time
+    // added when it was saved ("Dinoster 2026-10-01 18.30" -> "Dinoster")
+    function programmeName(job) {
+      return job.title.replace(/\s*\d{4}-\d{2}-\d{2}\s+\d{1,2}\.\d{2}(-\d{1,2}\.\d{2})?$/, '').trim() || job.title;
+    }
+
+    // Finished recordings as a gallery: one entry per film or programme, and a
+    // single entry per series holding its episodes
+    function groupRecordings(jobs) {
+      const groups = new Map();
+
+      for (const job of jobs) {
+        const metadata = job.metadata;
+        const text = metadata ? metadataText(metadata) : null;
+        let key, name;
+
+        if (metadata && metadata.kind === 'movie') {
+          key = `movie:${metadata.imdbId || metadata.tmdbId || job.id}`;
+          name = text.title || job.title;
+        } else {
+          // Episodes join their series by name, so a linked episode and one not
+          // linked yet from the same programme land together
+          name = (text && text.showTitle) || programmeName(job);
+          key = `name:${name.toLowerCase()}`;
+        }
+
+        if (!groups.has(key)) groups.set(key, { key, name, items: [] });
+        groups.get(key).items.push(job);
+      }
+
+      return [...groups.values()].map(group => {
+        const items = group.items.sort((a, b) =>
+          ((a.metadata && a.metadata.season) || 999) - ((b.metadata && b.metadata.season) || 999) ||
+          ((a.metadata && a.metadata.episode) || 999) - ((b.metadata && b.metadata.episode) || 999) ||
+          a.createdAt - b.createdAt
+        );
+        const linked = items.find(job => job.metadata);
+        const text = linked ? metadataText(linked.metadata) : null;
+        const isSeries = items.length > 1 || items.some(job => job.metadata && job.metadata.kind === 'episode');
+
+        return {
+          ...group,
+          items,
+          isSeries,
+          poster: text ? text.poster : '',
+          logo: items[0].channelLogo,
+          year: linked ? linked.metadata.year : '',
+          genres: text ? text.genres : [],
+          overview: !isSeries && text ? text.overview : '',
+          newest: Math.max(...items.map(job => job.createdAt))
+        };
+      }).sort((a, b) => b.newest - a.newest);
+    }
+
+    function RecordedCard({ entry, onOpen }) {
+      const count = entry.items.length;
+      return (
+        <div className="vod-card rec-card" onClick={() => onOpen(entry)} title={entry.name}>
+          {entry.poster ? (
+            <img
+              src={entry.poster}
+              alt=""
+              loading="lazy"
+              onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }}
+            />
+          ) : (
+            <div className="rec-card-blank">
+              <img src={entry.logo || CHANNEL_LOGO_FALLBACK} alt="" onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }} />
+              <span>{entry.name}</span>
+            </div>
+          )}
+          {entry.isSeries && <span className="rec-card-badge">{count} {count === 1 ? 'episode' : 'episodes'}</span>}
+          <div className="vod-card-info">
+            <div className="vod-card-name">{entry.name}</div>
+            {entry.year && <div className="vod-card-meta">{entry.year}</div>}
+          </div>
+        </div>
+      );
+    }
+
+    // Everything finished in the Library, to watch: films and programmes once,
+    // series once with the episodes that were recorded
+    function RecordedBrowser() {
+      const [data, setData] = useState(null);
+      const [error, setError] = useState('');
+      const [searchTerm, setSearchTerm] = useState('');
+      const [openKey, setOpenKey] = useState(null);
+      const [seasonIndex, setSeasonIndex] = useState(0);
+      const [busy, setBusy] = useState(false);
+      const player = useRecordingPlayer();
+
+      const load = async () => {
+        try {
+          const result = await api.recordings();
+          if (!result.success) throw new Error(result.error || 'Could not load the recordings');
+          setData(result);
+          setError('');
+        } catch (err) {
+          setError(err.message);
+        }
+      };
+
+      useEffect(() => { load(); }, []);
+
+      const run = async (action) => {
+        setBusy(true);
+        try {
+          await action();
+        } catch (err) {
+          setError(err.message || 'Action failed');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const play = (job) => run(() => player.play(job, data.castBase));
+      const download = (job) => run(() => player.download(job));
+
+      const entries = useMemo(
+        () => groupRecordings(data ? data.recordings.filter(job => job.state === 'done') : []),
+        [data]
+      );
+      const term = searchTerm.trim().toLowerCase();
+      const shown = term ? entries.filter(entry => entry.name.toLowerCase().includes(term)) : entries;
+      const open = openKey && entries.find(entry => entry.key === openKey);
+
+      // Episodes by season; those without a known season go together at the end
+      const seasons = useMemo(() => {
+        if (!open || !open.isSeries) return [];
+        const bySeason = new Map();
+        for (const job of open.items) {
+          const season = (job.metadata && job.metadata.season) || null;
+          if (!bySeason.has(season)) bySeason.set(season, []);
+          bySeason.get(season).push(job);
+        }
+        return [...bySeason.entries()].map(([season, jobs]) => ({
+          name: season ? `Season ${season}` : (bySeason.size > 1 ? 'Other' : 'Episodes'),
+          jobs
+        }));
+      }, [open]);
+      const season = seasons[Math.min(seasonIndex, Math.max(0, seasons.length - 1))];
+
+      const openEntry = (entry) => { setOpenKey(entry.key); setSeasonIndex(0); };
+
+      // Escape closes the details
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.key === 'Escape' && !player.playing && openKey) setOpenKey(null);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [openKey, !!player.playing]);
+
+      const progress = (job) => {
+        const at = savedRecordingPosition(job.id);
+        return at > 0 && job.outputDuration ? Math.min(100, (at / job.outputDuration) * 100) : 0;
+      };
+
+      const single = open && !open.isSeries ? open.items[0] : null;
+
+      return (
+        <div className="vod-browser">
+          <div className="vod-topbar solid">
+            <h2>Recorded</h2>
+            <div className="search-container vod-search">
+              <span className="search-icon"><Icon name="search" size={16} /></span>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search recordings by name..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="vod-scroll with-topbar">
+            {error && <div className="vod-message"><div className="error-msg">{error}</div></div>}
+            {!data && !error && <div className="vod-message">Loading...</div>}
+            {data && entries.length === 0 && (
+              <div className="vod-message">
+                Nothing here yet. Recordings appear here once they are finished in the Library.
+              </div>
+            )}
+            {data && entries.length > 0 && shown.length === 0 && (
+              <div className="vod-message">No recordings match "{searchTerm}".</div>
+            )}
+            {shown.length > 0 && (
+              <React.Fragment>
+                <div className="vod-grid-count">{shown.length} {shown.length === 1 ? 'title' : 'titles'}</div>
+                <div className="vod-grid">
+                  {shown.map(entry => <RecordedCard key={entry.key} entry={entry} onOpen={openEntry} />)}
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+
+          {open && !player.playing && (
+            <div className="modal-overlay" onClick={() => setOpenKey(null)}>
+              <div className="modal vod-detail" onClick={e => e.stopPropagation()}>
+                {open.poster && <div className="vod-detail-backdrop" style={{ backgroundImage: `url("${open.poster}")` }}></div>}
+                <button className="vod-close" onClick={() => setOpenKey(null)} title="Close"><Icon name="x" size={18} /></button>
+                <div className="vod-detail-top">
+                  <img
+                    src={open.poster || open.logo || POSTER_FALLBACK}
+                    className={open.poster ? '' : 'guide-detail-logo'}
+                    alt=""
+                    onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }}
+                  />
+                  <div className="vod-detail-text">
+                    <h2>{open.name}</h2>
+                    <div className="vod-meta">
+                      {[
+                        open.year,
+                        open.isSeries ? `${open.items.length} ${open.items.length === 1 ? 'episode' : 'episodes'} recorded` : '',
+                        single && single.outputDuration ? formatLength(single.outputDuration) : '',
+                        single ? single.channelName : ''
+                      ].filter(Boolean).map(m => <span key={m}>{m}</span>)}
+                    </div>
+                    {open.genres.length > 0 && <div className="vod-genres">{open.genres.slice(0, 3).join(' • ')}</div>}
+                    {open.overview && <p>{open.overview}</p>}
+
+                    {single && (
+                      <div className="vod-actions">
+                        <button className="vod-play" disabled={busy} onClick={() => play(single)}>
+                          <Icon name="play" size={16} filled /> {savedRecordingPosition(single.id) > 30 ? 'Resume' : 'Play'}
+                        </button>
+                        <button className="vod-secondary" disabled={busy} onClick={() => download(single)}>
+                          <Icon name="download" size={16} /> Download
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {open.isSeries && (
+                  <div className="vod-episodes">
+                    {seasons.length > 1 && (
+                      <div className="vod-seasons">
+                        {seasons.map((s, i) => (
+                          <button
+                            key={s.name}
+                            className={`theme-option ${s === season ? 'active' : ''}`}
+                            onClick={() => setSeasonIndex(i)}
+                          >
+                            {s.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="rec-episodes">
+                      {season && season.jobs.map(job => {
+                        const metadata = job.metadata;
+                        const text = metadata ? metadataText(metadata) : null;
+                        const number = metadata && metadata.season ? `S${metadata.season} E${metadata.episode}` : '';
+                        const done = progress(job);
+                        return (
+                          <div key={job.id} className="rec-episode" onClick={() => !busy && play(job)}>
+                            <div className="rec-episode-thumb">
+                              {metadata && metadata.image
+                                ? <img src={metadata.image} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
+                                : <img className="logo" src={job.channelLogo || CHANNEL_LOGO_FALLBACK} alt="" onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }} />}
+                              <span className="rec-episode-play"><Icon name="play" size={18} filled /></span>
+                              {done > 0 && <div className="rec-episode-progress"><span style={{ width: `${done}%` }}></span></div>}
+                            </div>
+                            <div className="rec-episode-text">
+                              <div className="rec-episode-title">
+                                {number && <span className="rec-episode-number">{number}</span>}
+                                {(text && text.title) || job.title}
+                              </div>
+                              <div className="rec-episode-sub">
+                                {[job.channelName, job.outputDuration ? formatLength(job.outputDuration) : ''].filter(Boolean).join(' · ')}
+                              </div>
+                              {text && text.overview && <div className="rec-episode-overview">{text.overview}</div>}
+                            </div>
+                            <button
+                              className="library-icon"
+                              title="Download the MP4"
+                              disabled={busy}
+                              onClick={(e) => { e.stopPropagation(); download(job); }}
+                            >
+                              <Icon name="download" size={16} />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {player.view}
+        </div>
+      );
+    }
+
     function LibraryBrowser() {
       const [data, setData] = useState(null);       // { recordings, ffmpeg, freeBytes }
       const [error, setError] = useState('');
       const [editing, setEditing] = useState(null);
-      const [playing, setPlaying] = useState(null); // { title, subtitle, url }
-      const videoRef = useRef(null);
       const [expanded, setExpanded] = useState(() => new Set()); // recordings showing their details
 
       const toggle = (id) => setExpanded(prev => {
@@ -2093,77 +2594,9 @@
         refresh();
       };
 
-      const media = async (job) => {
-        const ticket = await api.recordingTicket(job.id);
-        if (!ticket.success) throw new Error(ticket.error || 'Recording not available');
-        return `${BACKEND_ORIGIN}${ticket.url}`;
-      };
-
-      // Where the browser left off when the Chromecast took over, and back
-      const resumeAt = useRef(0);
-      const castTime = useRef(0);
-      const castApi = useCast();
-      if (castApi.loaded) castTime.current = castApi.time;
-
-      const play = (job) => act(async () => {
-        const url = await media(job);
-        const item = {
-          title: job.title,
-          subtitle: job.metadata ? metadataLine(job.metadata) : job.channelName,
-          url,
-          // The Chromecast may be given the server's address on the home network
-          castUrl: data.castBase ? `${data.castBase}${new URL(url).pathname}` : url,
-          image: job.metadata ? metadataText(job.metadata).poster : ''
-        };
-        // Already connected to a Chromecast: it plays there straight away
-        if (castApi.device) await sendToCast(item, 0);
-        else setPlaying(item);
-      });
-
-      // While the Chromecast has the video, the one in the browser is put away
-      const sendToCast = async (item, startAt) => {
-        resumeAt.current = startAt;
-        setPlaying({ ...item, casting: true });
-        let started = false;
-        try {
-          started = await castApi.start({ url: item.castUrl, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
-        } finally {
-          if (!started) setPlaying({ ...item, casting: false });
-        }
-      };
-
-      // The Chromecast stopped (here, or from the TV): continue in the browser
-      const wasCasting = useRef(false);
-      useEffect(() => {
-        if (wasCasting.current && !castApi.loaded) {
-          setPlaying(current => {
-            if (current) resumeAt.current = castTime.current;
-            return current && { ...current, casting: false };
-          });
-        }
-        wasCasting.current = castApi.loaded;
-      }, [castApi.loaded]);
-
-      const castPlaying = () => act(() => sendToCast(playing, videoRef.current ? videoRef.current.currentTime : 0));
-
-
-      const download = (job) => act(async () => {
-        const link = document.createElement('a');
-        link.href = `${await media(job)}?download=1`;
-        link.download = '';
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-      });
-
-      const closePlayer = () => {
-        const video = videoRef.current;
-        if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
-        if (document.fullscreenElement) document.exitFullscreen();
-        if (castApi.loaded) castApi.stop();
-        resumeAt.current = 0;
-        setPlaying(null);
-      };
+      const player = useRecordingPlayer();
+      const play = (job) => act(() => player.play(job, data.castBase));
+      const download = (job) => act(() => player.download(job));
 
       const recordings = data ? data.recordings : [];
       const groups = [
@@ -2286,66 +2719,7 @@
             />
           )}
 
-          {castApi.loaded && (
-            <div className="vod-player cast-remote">
-              <button className="cast-close" title="Stop and close" onClick={closePlayer}><Icon name="x" size={22} /></button>
-              {playing && playing.image && <img className="cast-poster" src={playing.image} alt="" />}
-              <div className="cast-device"><Icon name="cast" size={16} /> Playing on {castApi.device}</div>
-              <div className="cast-title">{playing ? playing.title : castApi.title}</div>
-              {playing && <div className="cast-subtitle">{playing.subtitle}</div>}
-              <input
-                className="cast-seek"
-                type="range"
-                min="0"
-                max={Math.max(1, Math.floor(castApi.duration))}
-                value={Math.floor(castApi.time)}
-                onChange={(e) => castApi.seek(Number(e.target.value))}
-              />
-              <div className="cast-time">{formatLength(castApi.time)} / {formatLength(castApi.duration)}</div>
-              <div className="cast-buttons">
-                <button className="pc-pill" onClick={() => castApi.seek(castApi.time - 10)}>−10 s</button>
-                <button className="cast-play" title={castApi.paused ? 'Play' : 'Pause'} onClick={castApi.toggle}>
-                  <Icon name={castApi.paused ? 'play' : 'pause'} size={26} filled />
-                </button>
-                <button className="pc-pill" onClick={() => castApi.seek(castApi.time + 30)}>+30 s</button>
-              </div>
-              {playing && <button className="vod-secondary cast-here" onClick={castApi.stop}>Play here instead</button>}
-            </div>
-          )}
-
-          {playing && playing.casting && !castApi.loaded && (
-            <div className="vod-player cast-remote">
-              <button className="cast-close" title="Close" onClick={closePlayer}><Icon name="x" size={22} /></button>
-              <div className="cast-device"><Icon name="cast" size={16} /> Connecting to the Chromecast…</div>
-              <div className="cast-title">{playing.title}</div>
-            </div>
-          )}
-
-          {playing && !playing.casting && !castApi.loaded && (
-            <div className="vod-player">
-              <video
-                key={playing.url}
-                ref={videoRef}
-                src={playing.url}
-                autoPlay
-                playsInline
-                onLoadedMetadata={(e) => {
-                  if (resumeAt.current) { e.currentTarget.currentTime = resumeAt.current; resumeAt.current = 0; }
-                }}
-              />
-              <PlayerControls
-                key={playing.url}
-                videoRef={videoRef}
-                title={playing.title}
-                subtitle={playing.subtitle}
-                onClose={closePlayer}
-              >
-                {castApi.available && (
-                  <button className="pc-pill" title="Play on a Chromecast" onClick={castPlaying}><Icon name="cast" size={16} /> Cast</button>
-                )}
-              </PlayerControls>
-            </div>
-          )}
+          {player.view}
         </div>
       );
     }
@@ -2358,7 +2732,7 @@
       
       // UI state
       const [screen, setScreen] = useState('login');
-      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'vod' | 'series'
+      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded'
       const [guideOpened, setGuideOpened] = useState(false); // keeps the guide mounted once visited
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
@@ -3426,6 +3800,7 @@
             {user?.sections?.series && (
               <div className={`nav-item ${section === 'series' ? 'active' : ''}`} title="Series" onClick={() => switchSection('series')}><Icon name="layers" /></div>
             )}
+            <div className={`nav-item ${section === 'recorded' ? 'active' : ''}`} title="Recorded" onClick={() => switchSection('recorded')}><Icon name="grid" /></div>
             <div className="nav-spacer"></div>
             <div className="nav-item" title="Preferences" onClick={() => setShowPreferences(true)}><Icon name="droplet" /></div>
             <div className="nav-item" title="Change Password" onClick={() => setShowChangePassword(true)}><Icon name="lock" /></div>
@@ -3438,6 +3813,8 @@
           {(section === 'vod' || section === 'series') && <VodBrowser key={section} type={section} />}
 
           {section === 'library' && <LibraryBrowser />}
+
+          {section === 'recorded' && <RecordedBrowser />}
 
           {guideOpened && (
             <div className="section-host" style={{ display: section === 'guide' ? 'flex' : 'none' }}>
