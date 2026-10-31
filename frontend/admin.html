@@ -102,6 +102,33 @@
     
     /* Settings */
     .settings-panel { max-width: 760px; }
+
+    /* Logs */
+    .logs-server { color: #888; font-weight: 400; font-size: 1rem; }
+    .logs-head-actions { display: flex; align-items: center; gap: 16px; }
+    .logs-follow { display: flex; align-items: center; gap: 6px; color: #aaa; font-size: 0.85rem; cursor: pointer; }
+    .logs-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+    .logs-filters select, .logs-filters input { padding: 9px 12px; border: 1px solid #333; border-radius: 8px; background: #1a1a2e; color: #eee; font-size: 0.85rem; }
+    .logs-filters input { flex: 1; min-width: 220px; }
+    .logs-table { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+    .logs-count { padding: 10px 14px; color: #888; border-bottom: 1px solid #2a2a3e; font-family: inherit; }
+    .log-row { display: grid; grid-template-columns: 74px 52px 90px 1fr; gap: 10px; padding: 6px 14px; border-bottom: 1px solid #222236; cursor: pointer; align-items: start; }
+    .log-row:hover { background: #222238; }
+    .log-row.warn { background: rgba(255, 193, 7, 0.05); }
+    .log-row.error { background: rgba(255, 100, 100, 0.08); }
+    .log-time { color: #777; }
+    .log-level { text-transform: uppercase; font-size: 0.7rem; color: #888; }
+    .log-level.warn { color: #ffc107; }
+    .log-level.error { color: #ff6464; }
+    .log-cat { color: #9aa8ff; overflow: hidden; text-overflow: ellipsis; }
+    .log-msg { color: #ddd; word-break: break-word; }
+    .log-fields { display: block; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .log-data { margin: 6px 0 0; padding: 8px 10px; background: #12121f; border-radius: 6px; color: #aaa; white-space: pre-wrap; word-break: break-all; }
+    .logs-more { padding: 14px; text-align: center; }
+    @media (max-width: 720px) {
+      .log-row { grid-template-columns: 64px 1fr; }
+      .log-level, .log-cat { display: none; }
+    }
     .settings-panel + .settings-panel { margin-top: 20px; }
     .settings-body { padding: 20px; }
     .settings-body code { background: #2a2a3e; padding: 1px 6px; border-radius: 4px; color: #ccc; }
@@ -138,7 +165,7 @@
 <body>
   <div id="root"></div>
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
     const API_URL = window.API_URL || (
       window.location.protocol === 'file:' || ['localhost', '127.0.0.1'].includes(window.location.hostname)
         ? 'http://localhost:3001/api'
@@ -155,9 +182,146 @@
       }
     };
 
+    // Logs of this server: one day at a time, newest first, with search
+    function LogsView() {
+      const [days, setDays] = useState([]);
+      const [day, setDay] = useState('');
+      const [level, setLevel] = useState('');
+      const [category, setCategory] = useState('');
+      const [query, setQuery] = useState('');
+      const [search, setSearch] = useState('');
+      const [result, setResult] = useState(null);
+      const [entries, setEntries] = useState([]);
+      const [open, setOpen] = useState(null);
+      const [follow, setFollow] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+
+      // The search box is applied a moment after typing stops
+      useEffect(() => {
+        const timer = setTimeout(() => setSearch(query.trim()), 400);
+        return () => clearTimeout(timer);
+      }, [query]);
+
+      const params = (extra = {}) => new URLSearchParams(Object.entries({
+        day, level, category, q: search, ...extra
+      }).filter(([, v]) => v)).toString();
+
+      const load = async (older = false) => {
+        setBusy(true);
+        setError('');
+        try {
+          const before = older && entries.length ? entries[entries.length - 1].t : '';
+          const data = await api.fetch(`/admin/logs?${params({ before })}`);
+          if (!data.success) throw new Error(data.error || 'Could not read the logs');
+          setDays(data.days);
+          if (!day && data.day) setDay(data.day);
+          setResult(data);
+          setEntries(older ? [...entries, ...data.entries] : data.entries);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      useEffect(() => { load(); }, [day, level, category, search]);
+
+      // Following: the newest entries are read again every few seconds
+      useEffect(() => {
+        if (!follow) return;
+        const timer = setInterval(() => load(), 5000);
+        return () => clearInterval(timer);
+      }, [follow, day, level, category, search]);
+
+      const download = async () => {
+        const response = await fetch(`${API_URL}/admin/logs/download?day=${day}`, { headers: { Authorization: `Bearer ${api.token}` } });
+        if (!response.ok) return setError('Could not download the file');
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${result.server}-${day}.jsonl`;
+        link.click();
+        URL.revokeObjectURL(url);
+      };
+
+      const time = (t) => new Date(t).toLocaleTimeString(undefined, { hour12: false });
+      const fields = (data) => Object.entries(data || {}).map(([k, v]) => `${k}=${v}`).join('  ');
+
+      return (
+        <main className="admin-main">
+          <div className="admin-header">
+            <h2>Logs{result && <span className="logs-server"> · {result.server}</span>}</h2>
+            <div className="logs-head-actions">
+              <label className="logs-follow">
+                <input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} /> Follow new entries
+              </label>
+              <button className="btn btn-secondary" disabled={!day} onClick={download}>Download day</button>
+            </div>
+          </div>
+
+          <div className="logs-filters">
+            <select value={day} onChange={e => setDay(e.target.value)}>
+              {days.length === 0 && <option value="">No logs yet</option>}
+              {days.map(d => <option key={d} value={d}>{d}</option>)}
+            </select>
+            <select value={level} onChange={e => setLevel(e.target.value)}>
+              <option value="">All levels</option>
+              <option value="warn">Warnings and errors</option>
+              <option value="error">Errors only</option>
+            </select>
+            <select value={category} onChange={e => setCategory(e.target.value)}>
+              <option value="">All categories</option>
+              {(result ? result.categories : []).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+            <input
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search: user, channel, error..."
+              spellCheck="false"
+            />
+          </div>
+
+          {error && <div className="error-msg">{error}</div>}
+
+          <div className="table-container logs-table">
+            <div className="logs-count">
+              {result ? `${result.total} ${result.total === 1 ? 'entry' : 'entries'}${result.total > entries.length ? `, showing the newest ${entries.length}` : ''}` : 'Loading...'}
+              {busy && ' · reading...'}
+            </div>
+            {entries.map((entry, i) => {
+              const key = `${entry.t}-${i}`;
+              return (
+                <div key={key} className={`log-row ${entry.level}`} onClick={() => setOpen(open === key ? null : key)}>
+                  <span className="log-time">{time(entry.t)}</span>
+                  <span className={`log-level ${entry.level}`}>{entry.level}</span>
+                  <span className="log-cat">{entry.cat}</span>
+                  <span className="log-msg">
+                    {entry.msg}
+                    {Object.keys(entry.data || {}).length > 0 && (
+                      open === key
+                        ? <pre className="log-data">{JSON.stringify(entry.data, null, 2)}</pre>
+                        : <span className="log-fields">{fields(entry.data)}</span>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+            {result && entries.length === 0 && <div className="groups-empty">Nothing matches.</div>}
+            {result && result.more && entries.length < result.total && (
+              <div className="logs-more">
+                <button className="btn btn-secondary" disabled={busy} onClick={() => load(true)}>Load older</button>
+              </div>
+            )}
+          </div>
+        </main>
+      );
+    }
+
     function App() {
       const [user, setUser] = useState(null);
-      const [view, setView] = useState('users'); // 'users' | 'settings'
+      const [view, setView] = useState('users'); // 'users' | 'settings' | 'logs'
       const [settings, setSettings] = useState(null);
       const [storageRoot, setStorageRoot] = useState('');
       const [settingsBusy, setSettingsBusy] = useState(false);
@@ -536,12 +700,15 @@
             <ul className="admin-nav">
               <li><a href="#" className={view === 'users' ? 'active' : ''} onClick={openView('users')}>👥 Users</a></li>
               <li><a href="#" className={view === 'settings' ? 'active' : ''} onClick={openView('settings')}>⚙️ Settings</a></li>
+              <li><a href="#" className={view === 'logs' ? 'active' : ''} onClick={openView('logs')}>📜 Logs</a></li>
               <li><a href="/">📺 Back to Player</a></li>
               <div className="divider"></div>
               <li><a href="#" onClick={() => { localStorage.removeItem('authToken'); window.location.href = '/'; }}>🚪 Logout</a></li>
             </ul>
           </aside>
           
+          {view === 'logs' && <LogsView />}
+
           {view === 'settings' && (
             <main className="admin-main">
               <div className="admin-header">

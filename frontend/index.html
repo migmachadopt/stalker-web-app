@@ -3197,6 +3197,8 @@
           : savedLiveConvert(channel.id);
         liveConvertRef.current = mode;
         setLiveConvert(mode);
+        // Known to need converting: starting takes a little longer, say why
+        if (mode && !isRetry && convert === undefined) setPlayerNotice('Converting this channel on the server...');
         
         try {
           const data = await api.iptvGetStream(channel.id, mode);
@@ -3234,6 +3236,16 @@
         playChannel(currentChannel, false, next);
       };
 
+      // The browser seems unable to play the channel. Converting on the server is
+      // tried first; the warning is only shown when nothing is playing and no
+      // conversion can help any more (a channel being converted may take a
+      // while to start, and a passing error while it plays is not a failure).
+      const cannotDecode = (channel, mode, video) => {
+        if (convertChannel(channel, mode)) return;
+        if (video && (video.videoWidth > 0 || video.currentTime > 0)) return;
+        setPlayerNotice('This channel cannot be decoded by this browser.');
+      };
+
       const loadStream = (streamUrl, streamType, channel) => {
         const video = videoRef.current;
         if (!video) return;
@@ -3253,7 +3265,7 @@
         };
         video.onerror = () => {
           cancelLiveRetry();
-          if (!convertChannel(channel, 'full')) setPlayerNotice('This channel cannot be decoded by this browser.');
+          cannotDecode(channel, 'full', video);
         };
 
         const absoluteUrl = streamUrl.startsWith('/')
@@ -3313,7 +3325,7 @@
             // The browser refused a codec: only the sound, or the picture too
             const message = String((info && info.msg) || '');
             const mode = /audio\//.test(message) ? 'audio' : 'full';
-            if (!convertChannel(channel, mode)) setPlayerNotice('This channel cannot be decoded by this browser.');
+            cannotDecode(channel, mode, video);
           });
 
           // Some codecs (MPEG-2 video, MP2 sound alone) are not even recognised:
@@ -3321,10 +3333,12 @@
           let described = false;
           player.on(mpegts.Events.MEDIA_INFO, () => { described = true; });
           clearTimeout(liveCodecTimer.current);
+          // A channel already converted on the server gets longer to show a picture
+          const converted = liveConvertRef.current === 'full';
           liveCodecTimer.current = setTimeout(() => {
             if (playerRef.current !== player || described || video.videoWidth > 0) return;
-            if (!convertChannel(channel, 'full')) setPlayerNotice('This channel cannot be decoded by this browser.');
-          }, 8000);
+            cannotDecode(channel, 'full', video);
+          }, converted ? 30000 : 8000);
 
           player.attachMediaElement(video);
           player.load();

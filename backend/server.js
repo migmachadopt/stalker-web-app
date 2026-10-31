@@ -353,6 +353,34 @@ app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res)
 });
 
 // Channel groups visible to a user (groups are hidden until enabled here)
+// Logs of this server, to search from the admin area (see logger.search)
+app.get('/api/admin/logs', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const days = logger.days();
+    const day = /^\d{4}-\d{2}-\d{2}$/.test(req.query.day || '') ? req.query.day : days[0];
+    const levels = { error: ['error'], warn: ['warn', 'error'] }[req.query.level] || [];
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 300, 50), 1000);
+    
+    const result = day
+      ? await logger.search({ day, query: req.query.q || '', levels, category: req.query.category || '', before: req.query.before || '', limit })
+      : { entries: [], categories: [], total: 0, more: false };
+    
+    res.json({ success: true, server: logger.server, days, day: day || null, ...result });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// The whole file of one day, to keep or send
+app.get('/api/admin/logs/download', authMiddleware, adminMiddleware, (req, res) => {
+  const day = req.query.day;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day || '') || !logger.days().includes(day)) {
+    return res.status(404).json({ success: false, error: 'No logs for that day' });
+  }
+  logger.flush(true);
+  res.download(logger.dayFile(day), `${logger.server}-${day}.jsonl`);
+});
+
 app.get('/api/admin/users/:id/groups', authMiddleware, adminMiddleware, (req, res) => {
   try {
     const user = userService.findUserById(req.params.id);
@@ -407,6 +435,17 @@ app.post('/api/admin/users/:id/groups/refresh', authMiddleware, adminMiddleware,
     logger.error('iptv', 'Admin channel list refresh error', { error: error.message });
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// Failures nobody caught still reach the logs
+process.on('unhandledRejection', (reason) => {
+  logger.error('server', 'Unhandled promise rejection', { error: (reason && reason.stack) || String(reason) });
+});
+
+process.on('uncaughtException', (error) => {
+  logger.error('server', 'Uncaught exception', { error: error.stack || error.message });
+  logger.flush(true);
+  process.exit(1);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

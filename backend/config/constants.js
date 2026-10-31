@@ -44,6 +44,10 @@ module.exports = {
   CONVERT_PRESET: process.env.CONVERT_PRESET || 'veryfast', // x264 speed/size trade-off
   CONVERT_CRF: process.env.CONVERT_CRF || '20',             // x264 quality (lower is better)
 
+  // Logs kept on this server for the admin area (data/logs, one file per day)
+  LOG_KEEP_DAYS: 7,
+  LOG_MAX_DAY_BYTES: 50 * 1024 * 1024, // past this, a day only keeps warnings and errors
+
   // Live channels the browser cannot play, converted on the server (admin Settings)
   LIVE_CONVERT_PRESET: process.env.LIVE_CONVERT_PRESET || 'veryfast', // x264 speed/quality trade-off
   LIVE_CONVERT_MAX_HEIGHT: 720,                                         // larger pictures are scaled down
