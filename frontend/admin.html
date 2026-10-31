@@ -340,6 +340,11 @@
       const [tmdbBusy, setTmdbBusy] = useState(false);
       const [tmdbError, setTmdbError] = useState('');
       const [tmdbNote, setTmdbNote] = useState('');
+      const [prowlarrUrl, setProwlarrUrl] = useState('');
+      const [prowlarrKey, setProwlarrKey] = useState('');
+      const [prowlarrBusy, setProwlarrBusy] = useState(false);
+      const [prowlarrError, setProwlarrError] = useState('');
+      const [prowlarrNote, setProwlarrNote] = useState('');
       const [loading, setLoading] = useState(true);
       const [users, setUsers] = useState([]);
       const [showModal, setShowModal] = useState(false);
@@ -571,6 +576,7 @@
           setCastBase(data.settings.castBaseUrl || '');
           setModules(data.settings.modules);
           setLiveConversion(!!data.settings.liveConversion);
+          setProwlarrUrl(data.settings.prowlarrUrl || '');
         } else {
           setSettingsError(data.error || 'Could not load the settings');
         }
@@ -625,7 +631,7 @@
         { id: 'library', label: 'Library', hint: 'Recordings kept on this server and converted to MP4, and the Recorded gallery. Needs ffmpeg and disk space' },
         { id: 'vod', label: 'Video club', hint: 'Also enabled per user' },
         { id: 'series', label: 'Series', hint: 'Also enabled per user' },
-        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch. Needs the TMDB key below' }
+        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch, with torrent sources from Prowlarr. Needs the TMDB key and the Prowlarr connection below' }
       ];
 
       const saveCastBase = async (e) => {
@@ -667,6 +673,28 @@
           setTmdbError(err.message);
         } finally {
           setTmdbBusy(false);
+        }
+      };
+
+      // Both empty removes the connection; an empty key keeps the one saved
+      const saveProwlarr = async (url, key) => {
+        setProwlarrBusy(true);
+        setProwlarrError('');
+        setProwlarrNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify(url ? { prowlarrUrl: url, ...(key ? { prowlarrKey: key } : {}) } : { prowlarrUrl: '', prowlarrKey: '' })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setProwlarrUrl(data.settings.prowlarrUrl || '');
+          setProwlarrKey('');
+          setProwlarrNote(url ? `Connected to Prowlarr ${data.prowlarrVersion} and saved.` : 'Prowlarr connection removed.');
+        } catch (err) {
+          setProwlarrError(err.message);
+        } finally {
+          setProwlarrBusy(false);
         }
       };
 
@@ -879,6 +907,61 @@
                   {settings?.settings?.tmdbKeySet && (
                     <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={tmdbBusy} onClick={() => confirm('Remove the TMDB key?') && saveTmdbKey('')}>
                       Remove key
+                    </button>
+                  )}
+                </form>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>🔎 Sources for Discover (Prowlarr)</h3>
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); if (prowlarrUrl.trim()) saveProwlarr(prowlarrUrl.trim(), prowlarrKey.trim()); }} className="settings-body">
+                  <div className="form-group">
+                    <label>Prowlarr address</label>
+                    <input
+                      type="text"
+                      value={prowlarrUrl}
+                      onChange={e => setProwlarrUrl(e.target.value)}
+                      placeholder="http://localhost:9696"
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                    <small>
+                      Address of Prowlarr as seen from this server: <code>http://localhost:9696</code> when it runs on the same machine.
+                    </small>
+                  </div>
+                  <div className="form-group">
+                    <label>Prowlarr API key</label>
+                    <input
+                      type="password"
+                      value={prowlarrKey}
+                      onChange={e => setProwlarrKey(e.target.value)}
+                      placeholder={settings?.settings?.prowlarrKeySet ? 'Saved. Type a new one to replace it' : 'In Prowlarr: Settings → General → API Key'}
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                    <small>
+                      Discover asks this Prowlarr for torrents of the film or episode chosen, from the indexers set up there.
+                      The key stays on this server.
+                    </small>
+                  </div>
+
+                  {settings && (
+                    <div className={`settings-status ${settings.settings.prowlarrUrl && settings.settings.prowlarrKeySet ? 'ok' : 'bad'}`}>
+                      {settings.settings.prowlarrUrl && settings.settings.prowlarrKeySet ? `Prowlarr at ${settings.settings.prowlarrUrl} is saved.` : 'No Prowlarr saved.'}
+                    </div>
+                  )}
+
+                  {prowlarrError && <div className="error-msg">{prowlarrError}</div>}
+                  {prowlarrNote && <div className="success-msg">{prowlarrNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={prowlarrBusy || !prowlarrUrl.trim() || (!prowlarrKey.trim() && !settings?.settings?.prowlarrKeySet)}>
+                    {prowlarrBusy ? 'Connecting...' : 'Save'}
+                  </button>
+                  {settings?.settings?.prowlarrUrl && (
+                    <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={prowlarrBusy} onClick={() => confirm('Remove the Prowlarr connection?') && saveProwlarr('', '')}>
+                      Remove
                     </button>
                   )}
                 </form>

@@ -166,6 +166,12 @@ const api = {
     return this.fetch(`/discover/tv/${id}/season/${number}?lang=${lang}`);
   },
   
+  // Torrents from Prowlarr for a film, or for one episode of a series
+  async discoverSources(kind, id, season, episode) {
+    const episodePart = kind === 'tv' ? `&season=${season}&episode=${episode}` : '';
+    return this.fetch(`/discover/sources?kind=${kind}&id=${id}${episodePart}`);
+  },
+  
   // Film or episode a recording is, from its IMDb or TMDB link
   async recordingLink(id, link) {
     return this.fetch(`/recordings/${id}/metadata`, { method: 'PUT', body: JSON.stringify({ link }) });

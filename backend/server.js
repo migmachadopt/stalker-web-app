@@ -18,6 +18,7 @@ const recordingService = require('./services/recordingService');
 const settingsService = require('./services/settingsService');
 const metadataService = require('./services/metadataService');
 const discoverService = require('./services/discoverService');
+const sourcesService = require('./services/sourcesService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -335,19 +336,30 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
     
-    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion });
+    // So is a new Prowlarr address or key (with the other one saved, when not given)
+    let prowlarrVersion = '';
+    if (prowlarrUrl || prowlarrKey) {
+      const saved = settingsService.prowlarr();
+      const url = prowlarrUrl !== undefined ? settingsService.prowlarrUrl(prowlarrUrl) : saved.url;
+      const key = prowlarrKey ? String(prowlarrKey).trim() : saved.key;
+      if (!url || !key) throw new Error('Fill in both the Prowlarr address and its API key.');
+      prowlarrVersion = await sourcesService.check(url, key);
+    }
+    
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
     if (modules !== undefined) logger.logUserActivity('admin', 'changed the parts of the app offered', settingsService.modules());
     if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
+    if (prowlarrUrl !== undefined || prowlarrKey !== undefined) logger.logUserActivity('admin', prowlarrVersion ? 'saved the Prowlarr connection' : 'removed the Prowlarr connection');
     
-    res.json({ success: true, settings, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root), ffmpeg: recordingService.status().ffmpeg });
+    res.json({ success: true, settings, prowlarrVersion, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root), ffmpeg: recordingService.status().ffmpeg });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }
@@ -969,6 +981,26 @@ app.get('/api/discover/search', discoverRoute(async (req) => {
 app.get('/api/discover/movie/:id', discoverRoute(async (req) => ({ title: await discoverService.movie(parseInt(req.params.id, 10), discoverLang(req)) })));
 
 app.get('/api/discover/tv/:id', discoverRoute(async (req) => ({ title: await discoverService.series(parseInt(req.params.id, 10), discoverLang(req)) })));
+
+// Torrents for a film, or for an episode (season and episode given), from Prowlarr
+app.get('/api/discover/sources', async (req, res) => {
+  try {
+    const kind = req.query.kind === 'tv' ? 'tv' : 'movie';
+    const id = parseInt(req.query.id, 10);
+    const season = parseInt(req.query.season, 10);
+    const episode = parseInt(req.query.episode, 10);
+    if (!id) throw new Error('Which title?');
+    if (kind === 'tv' && (!(season >= 0) || !(episode > 0))) throw new Error('Choose an episode first.');
+
+    // Names in English: they are what release names use
+    const title = kind === 'tv' ? await discoverService.series(id, 'en') : await discoverService.movie(id, 'en');
+    const sources = await sourcesService.search(title, season, episode);
+    res.json({ success: true, sources });
+  } catch (error) {
+    logger.warn('sources', 'Source search failed', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
 
 app.get('/api/discover/tv/:id/season/:number', discoverRoute(async (req) => ({
   season: await discoverService.season(parseInt(req.params.id, 10), parseInt(req.params.number, 10), discoverLang(req))

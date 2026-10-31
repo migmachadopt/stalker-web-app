@@ -21,6 +21,9 @@
 //
 // tmdbKey: key for themoviedb.org, used to read film and episode details for
 // the library (see metadataService). It never leaves the server.
+//
+// prowlarrUrl / prowlarrKey: the Prowlarr that finds torrents for Discover
+// (see sourcesService). The key never leaves the server either.
 
 const fs = require('fs');
 const path = require('path');
@@ -51,8 +54,8 @@ class SettingsService {
   }
 
   get() {
-    const { tmdbKey, ...shown } = this.settings;
-    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey };
+    const { tmdbKey, prowlarrKey, ...shown } = this.settings;
+    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey, prowlarrKeySet: !!prowlarrKey };
   }
 
   // { live: true, recordings: true, ... }; on unless turned off, except the
@@ -76,6 +79,19 @@ class SettingsService {
 
   tmdbKey() {
     return this.settings.tmdbKey || '';
+  }
+
+  prowlarr() {
+    return { url: this.settings.prowlarrUrl || '', key: this.settings.prowlarrKey || '' };
+  }
+
+  // http://localhost:9696 (a path is allowed, for a Prowlarr behind a proxy)
+  prowlarrUrl(value) {
+    const url = String(value || '').trim().replace(/\/+$/, '');
+    if (url && !/^https?:\/\/[^\/\s]+(\/\S*)?$/i.test(url)) {
+      throw new Error('Use an address like http://localhost:9696');
+    }
+    return url;
   }
 
   storageRoot() {
@@ -176,11 +192,19 @@ class SettingsService {
       next.tmdbKey = String(patch.tmdbKey || '').trim() || undefined;
     }
 
+    if (patch.prowlarrUrl !== undefined) {
+      next.prowlarrUrl = this.prowlarrUrl(patch.prowlarrUrl) || undefined;
+    }
+
+    if (patch.prowlarrKey !== undefined) {
+      next.prowlarrKey = String(patch.prowlarrKey || '').trim() || undefined;
+    }
+
     fs.mkdirSync(path.dirname(FILE), { recursive: true });
     fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
     this.settings = next;
 
-    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot(), tmdbKey: !!next.tmdbKey, modules: next.modules });
+    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot(), tmdbKey: !!next.tmdbKey, prowlarr: !!(next.prowlarrUrl && next.prowlarrKey), modules: next.modules });
     return this.get();
   }
 }

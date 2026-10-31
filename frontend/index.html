@@ -2755,6 +2755,121 @@
     // TMDB entries in the shape the video club cards use
     const discoverCard = (entry) => ({ ...entry, id: `${entry.kind}:${entry.id}`, tmdbId: entry.id, name: entry.title });
 
+    const SOURCE_RESOLUTIONS = ['4K', '1080p', '720p', 'SD'];
+    const SOURCE_SORTS = [['quality', 'Best quality'], ['seeders', 'Most seeders'], ['size', 'Smallest']];
+
+    const sourceAge = (date) => {
+      const days = date ? Math.floor((Date.now() - new Date(date).getTime()) / 86400000) : NaN;
+      if (!(days >= 0)) return '';
+      if (days < 1) return 'today';
+      if (days < 31) return `${days}d`;
+      if (days < 365) return `${Math.floor(days / 30)}mo`;
+      return `${Math.floor(days / 365)}y`;
+    };
+
+    // Torrents of a film or episode, from the Prowlarr set up in the admin Settings
+    function DiscoverSources({ request, onClose }) {
+      const [state, setState] = useState({ loading: true, items: [], error: '' });
+      const [resolution, setResolution] = useState('');
+      const [portuguese, setPortuguese] = useState(false);
+      const [sort, setSort] = useState('quality');
+
+      useEffect(() => {
+        let cancelled = false;
+        api.discoverSources(request.kind, request.tmdbId, request.season, request.episode)
+          .then(data => {
+            if (cancelled) return;
+            if (!data.success) throw new Error(data.error || 'Could not find sources');
+            setState({ loading: false, items: data.sources, error: '' });
+          })
+          .catch(err => !cancelled && setState({ loading: false, items: [], error: err.message }));
+        return () => { cancelled = true; };
+      }, [request.key]);
+
+      const isPortuguese = (item) => item.quality.languages.some(l => l === 'PT' || l === 'PT-BR');
+      const resolutions = SOURCE_RESOLUTIONS.filter(r => state.items.some(item => item.quality.resolution === r));
+      const hasPortuguese = state.items.some(isPortuguese);
+
+      // The server sends them best quality first
+      const shown = state.items
+        .filter(item => !resolution || item.quality.resolution === resolution)
+        .filter(item => !portuguese || isPortuguese(item));
+      if (sort === 'seeders') shown.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+      if (sort === 'size') shown.sort((a, b) => (a.size || Infinity) - (b.size || Infinity));
+
+      const badges = (item) => [
+        item.quality.resolution,
+        item.quality.source,
+        item.quality.hdr,
+        item.quality.codec,
+        item.quality.audio,
+        ...item.quality.languages,
+        item.pack ? (request.kind === 'tv' ? 'Season pack' : 'Pack') : ''
+      ].filter(Boolean);
+
+      return (
+        <div className="modal-overlay" onClick={onClose}>
+          <div className="modal vod-detail discover-sources" onClick={e => e.stopPropagation()}>
+            <button className="vod-close" onClick={onClose} title="Close"><Icon name="x" size={18} /></button>
+            <h2>Sources</h2>
+            <div className="discover-sources-for">{request.label}</div>
+
+            {!state.loading && state.items.length > 0 && (
+              <div className="discover-sources-filters">
+                <button className={`theme-option ${resolution === '' ? 'active' : ''}`} onClick={() => setResolution('')}>All</button>
+                {resolutions.map(r => (
+                  <button key={r} className={`theme-option ${resolution === r ? 'active' : ''}`} onClick={() => setResolution(resolution === r ? '' : r)}>{r}</button>
+                ))}
+                {hasPortuguese && (
+                  <button className={`theme-option ${portuguese ? 'active' : ''}`} onClick={() => setPortuguese(!portuguese)}>Portuguese</button>
+                )}
+                <select className="discover-sources-sort" value={sort} onChange={e => setSort(e.target.value)}>
+                  {SOURCE_SORTS.map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+                </select>
+              </div>
+            )}
+
+            {state.loading && (
+              <div className="vod-message"><span className="discover-spinner"></span>Searching the indexers in Prowlarr...</div>
+            )}
+            {state.error && <div className="error-msg">{state.error}</div>}
+            {!state.loading && !state.error && state.items.length === 0 && (
+              <div className="vod-message">No sources found for this {request.kind === 'tv' ? 'episode' : 'film'}.</div>
+            )}
+            {!state.loading && state.items.length > 0 && shown.length === 0 && (
+              <div className="vod-message">No sources with these filters.</div>
+            )}
+
+            <div className="discover-source-list">
+              {shown.map(item => (
+                <div key={item.id} className={`discover-source ${item.quality.cam ? 'cam' : ''}`}>
+                  <div className="discover-source-text">
+                    <div className="discover-source-badges">
+                      {badges(item).map(b => (
+                        <span key={b} className={`discover-badge ${b === item.quality.resolution ? 'strong' : b === 'CAM' ? 'warn' : ''}`} title={b === 'CAM' ? 'Filmed in a cinema' : undefined}>{b}</span>
+                      ))}
+                    </div>
+                    <div className="discover-source-title" title={item.title}>{item.title}</div>
+                    <div className="discover-source-sub">
+                      {[
+                        formatBytes(item.size),
+                        item.seeders !== null ? `${item.seeders} seeders` : '',
+                        item.indexer,
+                        sourceAge(item.date)
+                      ].filter(Boolean).join(' · ')}
+                    </div>
+                  </div>
+                  <button className="vod-play" disabled title="Coming in the next step">
+                    <Icon name="play" size={16} /> Play
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function DiscoverBrowser() {
       const [rows, setRows] = useState(null);        // opening page
       const [grid, setGrid] = useState(null);        // { title, row?, query?, kind?, items, page, totalPages, total, loading }
@@ -2764,6 +2879,7 @@
       const [seasonNumber, setSeasonNumber] = useState(null);
       const [season, setSeason] = useState(null);
       const [selectedEpisode, setSelectedEpisode] = useState(null);
+      const [sources, setSources] = useState(null);  // the film or episode whose sources are open
       const [heroIndex, setHeroIndex] = useState(0);
       const [error, setError] = useState('');
       const [detailError, setDetailError] = useState('');
@@ -2850,12 +2966,21 @@
       useEffect(() => {
         const onKey = (e) => {
           if (e.key !== 'Escape' || document.fullscreenElement) return;
-          if (detail) setDetail(null);
+          if (sources) setSources(null);
+          else if (detail) setDetail(null);
           else if (grid) closeGrid();
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-      }, [!!detail, !!grid]);
+      }, [!!detail, !!grid, !!sources]);
+
+      const findSources = (ep) => setSources(ep
+        ? {
+            key: `tv:${detail.tmdbId}:${seasonNumber}:${ep.number}`,
+            kind: 'tv', tmdbId: detail.tmdbId, season: seasonNumber, episode: ep.number,
+            label: `${detail.name} · S${String(seasonNumber).padStart(2, '0')}E${String(ep.number).padStart(2, '0')} · ${ep.title}`
+          }
+        : { key: `movie:${detail.tmdbId}`, kind: 'movie', tmdbId: detail.tmdbId, label: [detail.name, detail.year].filter(Boolean).join(' · ') });
 
       // The hero rotates through the trending titles
       const heroItems = rows && rows[0] ? rows[0].items.filter(item => item.backdrop).slice(0, 6) : [];
@@ -2979,7 +3104,7 @@
 
                     {detail.kind === 'movie' && !detail.loading && !detailError && (
                       <div className="vod-actions">
-                        <button className="vod-play" disabled title="Coming in the next step">
+                        <button className="vod-play" onClick={() => findSources(null)}>
                           <Icon name="search" size={16} /> Find sources
                         </button>
                       </div>
@@ -3032,7 +3157,7 @@
                                 {ep.overview && <div className="rec-episode-overview">{ep.overview}</div>}
                                 {chosen && (
                                   <div className="vod-actions discover-episode-actions">
-                                    <button className="vod-play" disabled title="Coming in the next step">
+                                    <button className="vod-play" onClick={(e) => { e.stopPropagation(); findSources(ep); }}>
                                       <Icon name="search" size={16} /> Find sources
                                     </button>
                                   </div>
@@ -3048,6 +3173,8 @@
               </div>
             </div>
           )}
+
+          {sources && <DiscoverSources request={sources} onClose={() => setSources(null)} />}
         </div>
       );
     }
