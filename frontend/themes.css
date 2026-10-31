@@ -5451,3 +5451,20 @@ video::cue {
   .home-poster { width: 120px; }
   .home-channel { width: 250px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   ANDROID TV APP - the focus moved by the remote, seen from the sofa
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.tv-app *:focus {
+  outline: 3px solid var(--accent-primary);
+  outline-offset: -3px;
+}
+
+button.prefs-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}

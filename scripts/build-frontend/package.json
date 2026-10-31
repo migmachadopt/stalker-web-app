@@ -1,0 +1,12 @@
+{
+  "name": "build-frontend",
+  "private": true,
+  "description": "Compiles the JSX of the frontend pages at deploy time",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "@babel/core": "7.26.0",
+    "@babel/preset-react": "7.26.3"
+  }
+}

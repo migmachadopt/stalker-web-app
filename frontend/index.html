@@ -54,7 +54,9 @@
       const isPhone = /iPhone|iPod|Android.*Mobile|Mobile.*Firefox|Windows Phone/i.test(navigator.userAgent)
         || (window.matchMedia('(pointer: coarse)').matches && smallestSide <= 500);
 
-      const mobile = (chosen || remembered || (isPhone ? 'mobile' : 'desktop')) === 'mobile';
+      // (the TV app always has the full version)
+      const mobile = typeof window.AndroidTV === 'undefined'
+        && (chosen || remembered || (isPhone ? 'mobile' : 'desktop')) === 'mobile';
 
       if (mobile && chosen !== 'mobile') {
         window.location.replace(`${window.location.pathname}?view=mobile`);
@@ -64,6 +66,328 @@
     })();
 
     if (MOBILE_VIEW) document.documentElement.classList.add('mobile-view');
+
+    // ── Android TV app ───────────────────────────────────────────────────────
+    // Inside the Android TV app (android-tv/), window.AndroidTV is the app's
+    // bridge: videos play in its own player (ExoPlayer, which plays the formats
+    // and the sound the TV can, MKV, AC3 and HEVC included) and the remote moves
+    // the focus around this page.
+    const TV_APP = typeof window.AndroidTV !== 'undefined';
+    if (TV_APP) document.documentElement.classList.add('tv-app');
+
+    // The TV app's player. play(media, handlers) shows it (in place of what it
+    // was playing, if anything) with
+    //   media    { url, hls, live, title, subtitle, startAt, next,
+    //              alternate: { url, hls, label, back, onError },
+    //              subtitles (true when there are subtitles to search),
+    //              subtitleTrack: { url, language, name } }
+    //   handlers { onPosition(position, duration, closing), onPlaying,
+    //              onEnded(error), onZap(step), onNext, onClose, subtitles }
+    // (subtitles: the provider of useRecordingPlayer items). Each play is a
+    // session: the events of one already replaced are only used for its last
+    // position.
+    const nativePlayer = (() => {
+      const sessions = new Map();
+      let last = 0;
+      let returnTo = null; // the control the video was started from, focused again after it
+
+      const reply = (method, session, value) => {
+        try { window.AndroidTV[method](session, JSON.stringify(value)); } catch (_) {}
+      };
+
+      const subtitleLabel = (entry) => [
+        SUBTITLE_LANGUAGES[entry.language] || entry.language,
+        entry.hashMatch ? '· in sync' : '',
+        entry.hearingImpaired ? '· SDH' : '',
+        entry.machine ? '· machine translated' : ''
+      ].filter(Boolean).join(' ');
+
+      window.__tvPlayerEvent = async (event) => {
+        const handlers = sessions.get(event.session);
+        if (!handlers) return;
+        switch (event.type) {
+          case 'position':
+            if (handlers.onPosition && event.position > 0) handlers.onPosition(event.position, event.duration, false);
+            break;
+          case 'closed':
+            sessions.delete(event.session);
+            if (handlers.onPosition && event.position > 0) handlers.onPosition(event.position, event.duration, true);
+            if (event.replaced) break;
+            if (handlers.onClose) handlers.onClose();
+            if (returnTo && returnTo.isConnected) returnTo.focus({ preventScroll: true });
+            else if (window.__tvFocusFirst) window.__tvFocusFirst();
+            break;
+          case 'playing':
+            if (handlers.onPlaying) handlers.onPlaying();
+            break;
+          case 'ended':
+            if (handlers.onEnded) handlers.onEnded(event.error || '');
+            break;
+          case 'zap':
+            if (handlers.onZap) handlers.onZap(event.step);
+            break;
+          case 'next':
+            if (handlers.onNext) handlers.onNext();
+            break;
+          case 'subtitleSearch': {
+            const provider = handlers.subtitles;
+            try {
+              const data = await provider.search();
+              if (!data.success) throw new Error(data.error || 'Could not look for subtitles');
+              reply('subtitleList', event.session, {
+                entries: data.subtitles.map(entry => ({ id: String(entry.id), language: entry.language, label: subtitleLabel(entry), release: entry.release }))
+              });
+            } catch (err) {
+              reply('subtitleList', event.session, { error: err.message });
+            }
+            break;
+          }
+          case 'subtitle': {
+            const provider = handlers.subtitles;
+            if (!event.id) {
+              provider.remember(null);
+              reply('setSubtitle', event.session, null);
+              break;
+            }
+            try {
+              const url = await provider.fetch(event.id);
+              provider.remember({ id: event.id, language: event.language });
+              reply('setSubtitle', event.session, { url, language: event.language, name: SUBTITLE_LANGUAGES[event.language] || event.language || 'Subtitles' });
+            } catch (err) {
+              reply('setSubtitle', event.session, { error: err.message });
+            }
+            break;
+          }
+        }
+      };
+
+      const absolute = (url) => new URL(url, window.location.href).href;
+
+      return {
+        play(media, handlers) {
+          const session = ++last;
+          if (!sessions.size) returnTo = document.activeElement !== document.body ? document.activeElement : null;
+          sessions.set(session, handlers || {});
+          window.AndroidTV.play(JSON.stringify({
+            ...media,
+            session,
+            url: absolute(media.url),
+            alternate: media.alternate && { ...media.alternate, url: absolute(media.alternate.url) },
+            subtitleTrack: media.subtitleTrack && { ...media.subtitleTrack, url: absolute(media.subtitleTrack.url) }
+          }));
+          return session;
+        },
+        notice(text) {
+          window.AndroidTV.notice(String(text || ''));
+        },
+        stop() {
+          window.AndroidTV.stop();
+        }
+      };
+    })();
+
+    // ── Remote control (TV app) ──────────────────────────────────────────────
+    // The arrows move the focus to the nearest control that way, OK presses it
+    // and Back (window.__tvBack, called by the app) closes what is open, then
+    // goes to the home page. Cards that are not buttons are made focusable as
+    // they appear; a window that opens takes the focus, and gives it back when
+    // it closes.
+    if (TV_APP) {
+      const CLICKABLE = '.nav-item, .vod-card, .continue-card, .guide-result, .guide-track-note.retry, .guide-prog, .rec-episode, .library-row, .home-channel, .home-card, .home-poster, .group-item, .channel-item';
+      const FOCUSABLE = `button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea, [tabindex]:not([tabindex="-1"]), ${CLICKABLE}`;
+      const TYPING = /^(text|search|password|email|number|url|tel)$/;
+
+      // The window on top (the last one opened), or the page
+      const layer = () => {
+        const open = document.querySelectorAll('.modal-overlay, .vod-player');
+        return open.length ? open[open.length - 1] : document.body;
+      };
+
+      // On screen across (it may be scrolled away up or down) and not clipped
+      // away by a panel slid aside. The containers are looked at once per key
+      // (there may be a thousand channels in them).
+      const shown = (el, boxes = new Map()) => {
+        const r = el.getBoundingClientRect();
+        if (!r.width || !r.height || r.right <= 0 || r.left >= window.innerWidth) return false;
+        for (let parent = el.parentElement; parent && parent !== document.body; parent = parent.parentElement) {
+          let box = boxes.get(parent);
+          if (box === undefined) {
+            const style = getComputedStyle(parent);
+            box = style.visibility === 'hidden' ? 'hidden'
+              : style.overflowX !== 'visible' ? parent.getBoundingClientRect()
+              : null;
+            boxes.set(parent, box);
+          }
+          if (box === 'hidden') return false;
+          if (box && (r.right <= box.left + 1 || r.left >= box.right - 1)) return false;
+        }
+        return true;
+      };
+
+      const candidates = (scope) => {
+        const boxes = new Map();
+        return Array.from(scope.querySelectorAll(FOCUSABLE)).filter(el => shown(el, boxes));
+      };
+
+      const focusTrail = [];
+      let focusedAt = null; // where the focused control was when focused
+      document.addEventListener('focusin', (e) => {
+        focusedAt = e.target.getBoundingClientRect();
+        focusTrail.push(e.target);
+        if (focusTrail.length > 50) focusTrail.shift();
+      });
+
+      const focusOn = (el) => {
+        el.focus({ preventScroll: true });
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
+      };
+
+      // Where the focus was last in this window (back from one opened over
+      // it), or its first control, the content before the side menu
+      const enter = (scope, returning) => {
+        if (returning) {
+          for (let i = focusTrail.length - 1; i >= 0; i--) {
+            const el = focusTrail[i];
+            if (el.isConnected && scope.contains(el) && shown(el)) return focusOn(el);
+          }
+        }
+        // (not a text field: on a TV that opens the keyboard at once)
+        const all = candidates(scope);
+        const typing = (el) => (el.tagName === 'INPUT' && TYPING.test(el.type)) || el.tagName === 'TEXTAREA';
+        const first = all.find(el => !el.closest('.nav-rail') && !typing(el)) || all.find(el => !el.closest('.nav-rail')) || all[0];
+        if (first) focusOn(first);
+      };
+
+      // Gap along the way asked and offset across it, the offset counting more
+      const distance = (a, b, way) => {
+        const across = (lo1, hi1, lo2, hi2) => Math.max(0, lo2 - hi1, lo1 - hi2);
+        switch (way) {
+          case 'ArrowRight': return b.left < a.right - 2 && b.left <= a.left ? null : [Math.max(0, b.left - a.right), across(a.top, a.bottom, b.top, b.bottom)];
+          case 'ArrowLeft': return b.right > a.left + 2 && b.right >= a.right ? null : [Math.max(0, a.left - b.right), across(a.top, a.bottom, b.top, b.bottom)];
+          case 'ArrowDown': return b.top < a.bottom - 2 && b.top <= a.top ? null : [Math.max(0, b.top - a.bottom), across(a.left, a.right, b.left, b.right)];
+          default: return b.bottom > a.top + 2 && b.bottom >= a.bottom ? null : [Math.max(0, a.top - b.bottom), across(a.left, a.right, b.left, b.right)];
+        }
+      };
+
+      // The control nearest to a place (the side menu last)
+      const nearest = (rect) => {
+        const centre = (r) => [r.left + r.width / 2, r.top + r.height / 2];
+        const [x, y] = centre(rect);
+        let best = null;
+        let bestScore = Infinity;
+        for (const one of candidates(layer())) {
+          const [cx, cy] = centre(one.getBoundingClientRect());
+          const score = Math.hypot(cx - x, cy - y) + (one.closest('.nav-rail') ? 400 : 0);
+          if (score < bestScore) { bestScore = score; best = one; }
+        }
+        if (best) focusOn(best);
+      };
+
+      const move = (way) => {
+        const scope = layer();
+        const current = document.activeElement;
+        if (!current || current === document.body || !scope.contains(current)) return enter(scope);
+        if (!shown(current)) return nearest(focusedAt || current.getBoundingClientRect());
+
+        const a = current.getBoundingClientRect();
+        let best = null;
+        let bestScore = Infinity;
+        for (const el of candidates(scope)) {
+          if (el === current || el.contains(current) || current.contains(el)) continue;
+          const d = distance(a, el.getBoundingClientRect(), way);
+          if (!d) continue;
+          const score = d[0] + d[1] * 3 + (d[1] > 0 ? 40 : 0);
+          if (score < bestScore) { bestScore = score; best = el; }
+        }
+        if (best) focusOn(best);
+      };
+
+      // After OK or Back the focused control may have gone or slid away (a
+      // panel of channels over the groups): the nearest one to where it was
+      const settle = () => {
+        const el = document.activeElement;
+        const was = el && el !== document.body ? el.getBoundingClientRect() : null;
+        setTimeout(() => {
+          const now = document.activeElement;
+          if (now && now !== document.body && shown(now) && layer().contains(now)) return;
+          if (was) nearest(was);
+          else enter(layer());
+        }, 450);
+      };
+
+      document.addEventListener('keydown', (e) => {
+        const el = document.activeElement;
+        const typing = el && ((el.tagName === 'INPUT' && TYPING.test(el.type)) || el.tagName === 'TEXTAREA');
+        const ranged = el && el.tagName === 'INPUT' && el.type === 'range';
+
+        if (e.key.startsWith('Arrow')) {
+          // The caret (or the slider) moves left and right in its field
+          if ((typing || ranged) && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
+          if (el && el.tagName === 'SELECT') return;
+          e.preventDefault();
+          e.stopPropagation();
+          move(e.key);
+        } else if (e.key === 'Enter' && !typing) {
+          settle();
+          if (el && el.matches && el.matches(CLICKABLE)) {
+            e.preventDefault();
+            e.stopPropagation();
+            el.click();
+          }
+        }
+      }, true);
+
+      window.__tvFocusFirst = () => enter(layer());
+
+      window.__tvBack = () => {
+        const el = document.activeElement;
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) { el.blur(); return true; }
+        settle();
+
+        // A panel slid over another one (channels over the groups) goes back
+        const panelBack = document.querySelector('.back-arrow-btn');
+        if (layer() === document.body && panelBack && shown(panelBack)) {
+          panelBack.click();
+          return true;
+        }
+
+        const scope = layer();
+        if (scope !== document.body) {
+          const close = scope.querySelector('.cast-close, .vod-back, button[title="Close"], button[title^="Close "], button[title="Stop and close"]');
+          if (close && shown(close)) close.click();
+          else if (scope.classList.contains('modal-overlay')) scope.click();
+          return true;
+        }
+
+        const navs = document.querySelectorAll('.nav-item');
+        const active = document.querySelector('.nav-item.active');
+        if (navs.length && active && active !== navs[0]) {
+          navs[0].click();
+          return true;
+        }
+        return false;
+      };
+
+      // Cards made focusable, and a new window given the focus
+      let scheduled = false;
+      let lastLayer = null;
+      new MutationObserver(() => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          document.querySelectorAll(CLICKABLE).forEach(el => { if (!el.hasAttribute('tabindex')) el.tabIndex = 0; });
+          const scope = layer();
+          if (scope !== lastLayer) {
+            const closed = lastLayer && !lastLayer.isConnected;
+            lastLayer = scope;
+            if (!scope.contains(document.activeElement)) enter(scope, closed);
+          } else if (!document.activeElement || document.activeElement === document.body) {
+            enter(scope);
+          }
+        });
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // ICONS (stroke icons, 24x24)
@@ -715,6 +1039,23 @@
         };
       };
 
+      // In the TV app the title plays in the app's own player
+      const playNatively = (title) => {
+        let saved = 0;
+        try { saved = Number(localStorage.getItem(title.key)) || 0; } catch (_) {}
+        nativePlayer.play({
+          url: `${BACKEND_ORIGIN}${title.streamUrl}`,
+          title: title.title,
+          subtitle: title.subtitle,
+          startAt: saved > 30 ? saved : 0,
+          next: title.next ? 'Next episode' : ''
+        }, {
+          onPosition: (position, duration) => rememberPosition(title, position, duration),
+          onNext: () => title.next && playTitle(title.next.item, title.next.season, title.next.episode),
+          onClose: () => setContinueList(readContinue().filter(e => e.type === type))
+        });
+      };
+
       const playTitle = async (item, season, episode) => {
         if (busy) return;
         setBusy(true);
@@ -722,7 +1063,9 @@
         try {
           setPlayerError('');
           lastSaved.current = 0;
-          setPlaying(await requestTitle(item, season, episode));
+          const title = await requestTitle(item, season, episode);
+          if (TV_APP) playNatively(title);
+          else setPlaying(title);
         } catch (err) {
           if (detail) setDetailError(err.message); else setError(err.message);
         } finally {
@@ -856,24 +1199,27 @@
       };
 
       // Remember the position, and keep the "Continue Watching" list up to date
-      const handleTimeUpdate = (e) => {
-        const video = e.currentTarget;
-        if (Math.abs(video.currentTime - lastSaved.current) < 5) return;
-        lastSaved.current = video.currentTime;
-
-        const position = Math.floor(video.currentTime);
-        const duration = isFinite(video.duration) ? Math.floor(video.duration) : 0;
+      const rememberPosition = (title, seconds, length) => {
+        const position = Math.floor(seconds);
+        const duration = isFinite(length) ? Math.floor(length) : 0;
         const finished = duration > 0 && position > duration - 90;
-        const others = readContinue().filter(entry => entry.key !== playing.key);
+        const others = readContinue().filter(entry => entry.key !== title.key);
 
         try {
-          if (finished) localStorage.removeItem(playing.key);
-          else localStorage.setItem(playing.key, String(position));
+          if (finished) localStorage.removeItem(title.key);
+          else localStorage.setItem(title.key, String(position));
         } catch (_) {}
 
         writeContinue(finished || position < 30
           ? others
-          : [{ ...playing.entry, key: playing.key, position, duration, updatedAt: Date.now() }, ...others]);
+          : [{ ...title.entry, key: title.key, position, duration, updatedAt: Date.now() }, ...others]);
+      };
+
+      const handleTimeUpdate = (e) => {
+        const video = e.currentTarget;
+        if (Math.abs(video.currentTime - lastSaved.current) < 5) return;
+        lastSaved.current = video.currentTime;
+        rememberPosition(playing, video.currentTime, video.duration);
       };
 
       // Subtitles embedded in the file are found by the server as the film is
@@ -2178,6 +2524,35 @@
     // start, item.onPosition(seconds, duration) hears where the viewer is, and
     // item.subtitles offers subtitles to choose: { search() -> { subtitles },
     // fetch(id) -> address, remembered, remember(entry) }
+    // An item of useRecordingPlayer in the TV app's player, with the subtitle
+    // chosen for it before already on
+    async function playItemNatively(item, startAt) {
+      let subtitleTrack = null;
+      const remembered = item.subtitles && item.subtitles.remembered;
+      if (remembered) {
+        try {
+          subtitleTrack = { url: await item.subtitles.fetch(remembered.id), language: remembered.language, name: SUBTITLE_LANGUAGES[remembered.language] || remembered.language || 'Subtitles' };
+        } catch (_) {}
+      }
+      const other = item.alternate;
+      nativePlayer.play({
+        url: item.url,
+        hls: !!item.hls,
+        title: item.title,
+        subtitle: item.subtitle,
+        startAt: startAt || 0,
+        alternate: other && { url: other.item.url, hls: !!other.item.hls, label: other.label, back: other.back, onError: !!other.onError },
+        subtitles: !!item.subtitles,
+        subtitleTrack
+      }, {
+        onPosition: (position, duration, closing) => {
+          saveRecordingPosition(item.id, position, duration);
+          if (item.onPosition) item.onPosition(position, duration, closing);
+        },
+        subtitles: item.subtitles
+      });
+    }
+
     function useRecordingPlayer() {
       const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, castType, hls, alternate, image, casting }
       const videoRef = useRef(null);
@@ -2214,7 +2589,8 @@
 
       // Already connected to a Chromecast: it plays there straight away
       const open = async (item) => {
-        if (castApi.device) await sendToCast(item, startPosition(item));
+        if (TV_APP) await playItemNatively(item, startPosition(item));
+        else if (castApi.device) await sendToCast(item, startPosition(item));
         else setPlaying(item);
       };
 
@@ -3053,6 +3429,7 @@
     // Can the browser play Real-Debrid's file as it is, or should it start with
     // Real-Debrid's converted version?
     function browserPlaysFile(filename, quality) {
+      if (TV_APP) return true; // with the converted version if the TV cannot
       const ext = (String(filename).match(/\.(\w+)$/) || [])[1] || '';
       if (quality.codec === 'HEVC' || quality.codec === 'AV1') return false;
       if (/^(mp4|m4v|webm)$/i.test(ext)) return true;
@@ -4127,6 +4504,8 @@
       
       // Live playback recovery
       const [playerNotice, setPlayerNotice] = useState('');
+      // (in the TV app, shown over its player)
+      useEffect(() => { if (TV_APP) nativePlayer.notice(playerNotice); }, [playerNotice]);
       const liveRetryRef = useRef({ count: 0, timer: null, startedAt: 0 });
 
       // Channels the browser cannot play may be converted on the server (admin
@@ -4487,7 +4866,7 @@
 
         // A retry keeps the way the channel was being played; otherwise the
         // way that worked for this channel before is used
-        const mode = !liveConversion ? null
+        const mode = !liveConversion || TV_APP ? null
           : convert !== undefined ? convert
           : isRetry ? liveConvertRef.current
           : savedLiveConvert(channel.id);
@@ -4536,7 +4915,45 @@
         setPlayerNotice('This channel cannot be decoded by this browser.');
       };
 
+      // In the TV app the channel plays in the app's own player (no conversion
+      // needed); Up and Down there change to the channel before or after it in
+      // its group, and a stream that drops is asked for again as here
+      const playLiveNatively = (url, streamType, channel) => {
+        setVideoLoading(false);
+        const group = channels
+          .filter(ch => ch.tv_genre_id === channel.tv_genre_id)
+          .sort((a, b) => a.number - b.number);
+        nativePlayer.play({
+          url,
+          hls: streamType === 'HLS',
+          live: true,
+          title: `${channel.number ? `${channel.number}  ` : ''}${channel.name}`
+        }, {
+          onPlaying: () => {
+            liveRetryRef.current.startedAt = Date.now();
+            setPlayerNotice('');
+          },
+          onEnded: () => scheduleLiveRetry(channel),
+          onZap: (step) => {
+            const at = group.findIndex(ch => ch.id === channel.id);
+            const next = group.length ? group[(at + step + group.length) % group.length] : null;
+            if (next && next.id !== channel.id) playChannel(next);
+          },
+          // Back to the list, with nothing shown in the page's own player
+          onClose: () => {
+            cancelLiveRetry();
+            setPlayerNotice('');
+            setCurrentChannel(null);
+          }
+        });
+      };
+
       const loadStream = (streamUrl, streamType, channel) => {
+        if (TV_APP) {
+          playLiveNatively(streamUrl.startsWith('/') ? `${BACKEND_ORIGIN}${streamUrl}` : streamUrl, streamType, channel);
+          return;
+        }
+
         const video = videoRef.current;
         if (!video) return;
 
@@ -5570,7 +5987,9 @@
                   </div>
                 </div>
 
-                <a className="prefs-link" href="?view=mobile">Open the mobile version</a>
+                {TV_APP
+                  ? <button type="button" className="prefs-link" onClick={() => window.AndroidTV.changeServer()}>Change the server address</button>
+                  : <a className="prefs-link" href="?view=mobile">Open the mobile version</a>}
 
                 <button 
                   type="button" 

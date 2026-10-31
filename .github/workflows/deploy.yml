@@ -36,6 +36,12 @@ jobs:
           node --check config/constants.js
           node --check services/iptvService.js
 
+      - name: 🛠️ Check the pages compile
+        working-directory: ./scripts/build-frontend
+        run: |
+          npm ci --no-audit --no-fund
+          node build.js ../../frontend --check
+
       - name: ✅ Tests passed
         run: echo "✅ All tests passed!"
 
@@ -86,6 +92,14 @@ jobs:
           else
             echo "✅ data/ is already a symlink"
           fi
+
+      # The pages' JSX compiled here, before anything is copied, so a page that
+      # does not compile leaves the running app as it was
+      - name: 🛠️ Compile the pages
+        working-directory: ./scripts/build-frontend
+        run: |
+          npm ci --no-audit --no-fund
+          node build.js ../../frontend
 
       - name: 💾 Backup .env file
         run: |

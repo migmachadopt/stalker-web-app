@@ -382,7 +382,7 @@
       };
 
       const toggle = (id) => setSelected(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
-      const all = data && data.torrents.length > 0 && selected.length === data.torrents.length;
+      const all = data && data.connected && data.torrents.length > 0 && selected.length === data.torrents.length;
       const size = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round((bytes || 0) / 1e6)} MB`);
       const date = (value) => (value ? new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
       const status = (t) => (t.status === 'downloaded' ? 'Ready'
