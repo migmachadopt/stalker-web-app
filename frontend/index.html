@@ -1915,7 +1915,8 @@
 
         // Asks which Chromecast to use (if none is connected) and plays there.
         // Resolves to false when the viewer closes the list of devices.
-        async start({ url, contentType, title, subtitle, image, startAt }) {
+        // subtitles: { url, language, name } shown on the TV (a WebVTT address it can reach)
+        async start({ url, contentType, title, subtitle, image, startAt, subtitles }) {
           const context = cast.framework.CastContext.getInstance();
 
           if (!context.getCurrentSession()) {
@@ -1932,10 +1933,20 @@
           info.metadata.title = title;
           info.metadata.subtitle = subtitle || '';
           if (image) info.metadata.images = [new chrome.cast.Image(image)];
+          if (subtitles) {
+            const track = new chrome.cast.media.Track(1, chrome.cast.media.TrackType.TEXT);
+            track.trackContentId = subtitles.url;
+            track.trackContentType = 'text/vtt';
+            track.subtype = chrome.cast.media.TextTrackType.SUBTITLES;
+            track.name = subtitles.name;
+            track.language = subtitles.language;
+            info.tracks = [track];
+          }
 
           const request = new chrome.cast.media.LoadRequest(info);
           request.currentTime = Math.max(0, Math.floor(startAt || 0));
           request.autoplay = true;
+          if (subtitles) request.activeTrackIds = [1];
 
           const error = await context.getCurrentSession().loadMedia(request);
           if (error) throw new Error(`The Chromecast could not play this video (${error})`);
@@ -2084,7 +2095,9 @@
     // Also plays other videos through open(item): item.hls marks an HLS
     // address, item.alternate ({ label, item }) another version of the same
     // video (used too when this one fails to play), item.startAt where to
-    // start, and item.onPosition(seconds, duration) hears where the viewer is
+    // start, item.onPosition(seconds, duration) hears where the viewer is, and
+    // item.subtitles offers subtitles to choose: { search() -> { subtitles },
+    // fetch(id) -> address, remembered, remember(entry) }
     function useRecordingPlayer() {
       const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, castType, hls, alternate, image, casting }
       const videoRef = useRef(null);
@@ -2152,7 +2165,7 @@
         setPlaying({ ...item, casting: true });
         let started = false;
         try {
-          started = await castApi.start({ url: item.castUrl || item.url, contentType: item.castType, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
+          started = await castApi.start({ url: item.castUrl || item.url, contentType: item.castType, subtitles: track && { url: track.url, language: track.language, name: track.name }, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
         } finally {
           if (!started) setPlaying({ ...item, casting: false });
         }
@@ -2194,6 +2207,73 @@
         link.click();
         link.remove();
       };
+
+      // Subtitles of item.subtitles: the list (asked for when the menu first
+      // opens) and the one shown, as a WebVTT kept in the browser
+      const [subs, setSubs] = useState(null);   // { open, loading, list, error, busy, chosen }
+      const [track, setTrack] = useState(null); // { src, url, language, name }
+
+      const chooseSubtitle = async (entry) => {
+        const provider = playing && playing.subtitles;
+        if (!provider) return;
+        if (!entry) {
+          setTrack(null);
+          provider.remember(null);
+          setSubs(current => ({ ...(current || {}), chosen: null, open: false }));
+          return;
+        }
+        setSubs(current => ({ ...(current || {}), busy: entry.id, error: '' }));
+        try {
+          const url = await provider.fetch(entry.id);
+          const response = await fetch(url);
+          if (!response.ok) throw new Error('This subtitle is not available');
+          const src = URL.createObjectURL(new Blob([await response.text()], { type: 'text/vtt' }));
+          setTrack({ src, url, language: entry.language, name: SUBTITLE_LANGUAGES[entry.language] || entry.language || 'Subtitles' });
+          provider.remember({ id: entry.id, language: entry.language });
+          setSubs(current => ({ ...(current || {}), busy: null, chosen: entry.id, open: false }));
+        } catch (err) {
+          setSubs(current => ({ ...(current || {}), busy: null, error: err.message }));
+        }
+      };
+
+      const toggleSubtitles = async () => {
+        if (subs && subs.open) return setSubs({ ...subs, open: false });
+        setSubs(current => ({ ...(current || {}), open: true }));
+        if (subs && (subs.list || subs.loading)) return;
+        setSubs(current => ({ ...current, loading: true, error: '' }));
+        try {
+          const data = await playing.subtitles.search();
+          if (!data.success) throw new Error(data.error || 'Could not look for subtitles');
+          setSubs(current => ({ ...current, loading: false, list: data.subtitles }));
+        } catch (err) {
+          setSubs(current => ({ ...current, loading: false, error: err.message }));
+        }
+      };
+
+      // A new title: no list yet, and the subtitle chosen for it before, if any
+      useEffect(() => {
+        setSubs(null);
+        setTrack(null);
+        const remembered = playing && playing.subtitles && playing.subtitles.remembered;
+        if (remembered) chooseSubtitle(remembered);
+      }, [playing && playing.id]);
+
+      useEffect(() => () => { if (track) URL.revokeObjectURL(track.src); }, [track && track.src]);
+
+      // Shown, and clear of the control bar (as in the video club)
+      const placeTrack = useRef((element) => {
+        if (!element) return;
+        const place = () => {
+          element.track.mode = 'showing';
+          for (const cue of Array.from(element.track.cues || [])) {
+            cue.snapToLines = false;
+            cue.line = 84;
+            cue.lineAlign = 'end';
+          }
+        };
+        element.addEventListener('load', place);
+        place();
+      }).current;
 
       const startPosition = (item) => (item.startAt !== undefined ? item.startAt : savedRecordingPosition(item.id));
 
@@ -2277,13 +2357,50 @@
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
                 onError={() => { if (playing.alternate && playing.alternate.onError) switchVersion(); }}
-              />
+              >
+                {track && <track key={track.src} ref={placeTrack} kind="subtitles" src={track.src} srcLang={track.language} label={track.name} default />}
+              </video>
+              {subs && subs.open && (
+                <div className="subs-menu" onClick={e => e.stopPropagation()}>
+                  <div className="subs-head">
+                    <span>Subtitles</span>
+                    <button className="pc-icon" title="Close" onClick={() => setSubs({ ...subs, open: false })}><Icon name="x" size={18} /></button>
+                  </div>
+                  <button className={`subs-item ${!track ? 'on' : ''}`} onClick={() => chooseSubtitle(null)}>
+                    <span className="subs-lang">Off</span>
+                  </button>
+                  {subs.loading && <div className="subs-note"><span className="discover-spinner"></span>Looking for subtitles...</div>}
+                  {subs.error && <div className="error-msg">{subs.error}</div>}
+                  {subs.list && subs.list.length === 0 && <div className="subs-note">No subtitles found for this title.</div>}
+                  {(subs.list || []).map(entry => (
+                    <button
+                      key={entry.id}
+                      className={`subs-item ${subs.chosen === entry.id ? 'on' : ''}`}
+                      disabled={!!subs.busy}
+                      onClick={() => chooseSubtitle(entry)}
+                    >
+                      <span className="subs-lang">
+                        {SUBTITLE_LANGUAGES[entry.language] || entry.language}
+                        {subs.busy === entry.id && <span className="discover-spinner"></span>}
+                      </span>
+                      <span className="subs-release" title={entry.release}>{entry.release}</span>
+                      <span className="subs-tags">
+                        {entry.hashMatch && <span className="discover-badge ready">In sync with this file</span>}
+                        {entry.hearingImpaired && <span className="discover-badge">For the deaf</span>}
+                        {entry.machine && <span className="discover-badge">Machine translated</span>}
+                        <span className="subs-downloads">{entry.downloads} downloads</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <PlayerControls
                 key={playing.url}
                 videoRef={videoRef}
                 title={playing.title}
                 subtitle={playing.subtitle}
                 onClose={closePlayer}
+                captions={playing.subtitles ? { on: !!track, onToggle: toggleSubtitles } : null}
               >
                 {playing.alternate && (
                   <button className="pc-pill" title={playing.alternate.hint || ''} onClick={switchVersion}>{playing.alternate.label}</button>
@@ -2818,6 +2935,12 @@
       return `${Math.floor(days / 365)}y`;
     };
 
+    const SUBTITLE_LANGUAGES = { 'pt-PT': 'Português', 'pt-BR': 'Português (Brasil)', en: 'English' };
+
+    // Subtitles listed Portuguese first whatever the app language: the films
+    // are mostly in English, and the household reads Portuguese
+    const SUBTITLE_PREFERENCE = 'pt';
+
     // Audio most browsers cannot play
     const BROWSER_SILENT_AUDIO = ['AC3', 'DD+', 'DTS', 'TrueHD', 'Atmos'];
 
@@ -2833,7 +2956,7 @@
     // Player item for a source Real-Debrid has ready: the file itself and the
     // converted version, the second one offered as the other choice
     function debridItem(request, source, ready) {
-      const base = { id: `discover:${request.key}`, title: request.title, subtitle: request.subtitle, image: request.image };
+      const base = { id: `discover:${request.key}`, title: request.title, subtitle: request.subtitle, image: request.image, torrent: ready.torrent };
       const original = { ...base, url: ready.url, castType: 'video/mp4' };
       if (!ready.hls) return original;
       const converted = { ...base, url: ready.hls, hls: true, castType: 'application/x-mpegurl' };
@@ -2853,7 +2976,7 @@
         const data = await api.discoverPlayState(started.torrent, request);
         if (run.cancelled) return null;
         if (!data.success) throw new Error(data.error || 'Real-Debrid did not answer');
-        if (data.state === 'ready') return data;
+        if (data.state === 'ready') return { ...data, torrent: started.torrent };
         onState(data);
         await new Promise(resolve => setTimeout(resolve, data.state === 'downloading' ? 4000 : 2000));
       }
@@ -3226,7 +3349,20 @@
           positionSent.current = Date.now();
           api.discoverPosition(request, position, isFinite(duration) ? duration : 0).catch(() => {});
         };
-        const withPosition = (one) => one && { ...one, onPosition };
+        const rememberKey = `discover:sub:${request.key}`;
+        const subtitles = {
+          search: () => api.discoverSubtitles(request, item.torrent, SUBTITLE_PREFERENCE),
+          fetch: async (id) => {
+            const data = await api.discoverSubtitle(id);
+            if (!data.success) throw new Error(data.error || 'Could not get this subtitle');
+            return `${BACKEND_ORIGIN}${data.url}`;
+          },
+          remembered: (() => { try { return JSON.parse(localStorage.getItem(rememberKey)); } catch (_) { return null; } })(),
+          remember: (entry) => {
+            try { entry ? localStorage.setItem(rememberKey, JSON.stringify(entry)) : localStorage.removeItem(rememberKey); } catch (_) {}
+          }
+        };
+        const withPosition = (one) => one && { ...one, onPosition, subtitles };
         player.open({
           ...withPosition(item),
           startAt: positionOf(request.key),

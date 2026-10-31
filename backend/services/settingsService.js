@@ -27,6 +27,10 @@
 //
 // realDebridToken: Real-Debrid account that downloads and plays those
 // torrents (see debridService). Kept on the server too.
+//
+// openSubtitlesKey / openSubtitlesUser / openSubtitlesPassword: subtitles for
+// those films and episodes (see openSubtitlesService). The account is
+// optional; the key and password never leave the server.
 
 const fs = require('fs');
 const path = require('path');
@@ -57,8 +61,16 @@ class SettingsService {
   }
 
   get() {
-    const { tmdbKey, prowlarrKey, realDebridToken, ...shown } = this.settings;
-    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey, prowlarrKeySet: !!prowlarrKey, realDebridTokenSet: !!realDebridToken };
+    const { tmdbKey, prowlarrKey, realDebridToken, openSubtitlesKey, openSubtitlesPassword, ...shown } = this.settings;
+    return {
+      ...shown,
+      modules: this.modules(),
+      tmdbKeySet: !!tmdbKey,
+      prowlarrKeySet: !!prowlarrKey,
+      realDebridTokenSet: !!realDebridToken,
+      openSubtitlesKeySet: !!openSubtitlesKey,
+      openSubtitlesPasswordSet: !!openSubtitlesPassword
+    };
   }
 
   // { live: true, recordings: true, ... }; on unless turned off, except the
@@ -86,6 +98,14 @@ class SettingsService {
 
   prowlarr() {
     return { url: this.settings.prowlarrUrl || '', key: this.settings.prowlarrKey || '' };
+  }
+
+  openSubtitles() {
+    return {
+      key: this.settings.openSubtitlesKey || '',
+      user: this.settings.openSubtitlesUser || '',
+      password: this.settings.openSubtitlesPassword || ''
+    };
   }
 
   realDebridToken() {
@@ -210,6 +230,15 @@ class SettingsService {
     if (patch.realDebridToken !== undefined) {
       next.realDebridToken = String(patch.realDebridToken || '').trim() || undefined;
       next.realDebridUser = patch.realDebridUser || undefined;
+    }
+
+    // The key, the account and what OpenSubtitles said about it, saved together
+    if (patch.openSubtitles !== undefined) {
+      const { key, user, password, account } = patch.openSubtitles;
+      next.openSubtitlesKey = key || undefined;
+      next.openSubtitlesUser = user || undefined;
+      next.openSubtitlesPassword = (user && password) || undefined;
+      next.openSubtitlesAccount = account || undefined;
     }
 
     fs.mkdirSync(path.dirname(FILE), { recursive: true });

@@ -197,6 +197,17 @@ const api = {
     });
   },
   
+  // Subtitles for a film or episode (torrent: the one playing, to find those in sync)
+  async discoverSubtitles(request, torrent, lang) {
+    const episodePart = request.kind === 'tv' ? `&season=${request.season}&episode=${request.episode}` : '';
+    return this.fetch(`/discover/subtitles?kind=${request.kind}&tmdbId=${request.tmdbId}${episodePart}&lang=${lang}${torrent ? `&torrent=${torrent}` : ''}`);
+  },
+  
+  // Downloads one subtitle to the server; answers its address
+  async discoverSubtitle(fileId) {
+    return this.fetch(`/discover/subtitles/${fileId}`, { method: 'POST' });
+  },
+  
   // Sources played for a film, or for each episode of a series
   async discoverHistory(kind, id) {
     return this.fetch(`/discover/history/${kind}/${id}`);

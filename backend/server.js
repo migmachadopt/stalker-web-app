@@ -21,6 +21,7 @@ const discoverService = require('./services/discoverService');
 const sourcesService = require('./services/sourcesService');
 const debridService = require('./services/debridService');
 const historyService = require('./services/historyService');
+const openSubtitlesService = require('./services/openSubtitlesService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -338,7 +339,7 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, openSubtitles: subtitlesPatch } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
@@ -357,12 +358,26 @@ app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res)
     let realDebridUser;
     if (realDebridToken) realDebridUser = await debridService.check(String(realDebridToken).trim());
     
-    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, realDebridUser });
+    // And the OpenSubtitles key (with the account, when given). An empty key
+    // removes them; an empty password keeps the one saved for the same user.
+    let openSubtitles;
+    if (subtitlesPatch) {
+      const saved = settingsService.openSubtitles();
+      const key = String(subtitlesPatch.key || '').trim() || (subtitlesPatch.remove ? '' : saved.key);
+      const user = key ? String(subtitlesPatch.user || '').trim() : '';
+      const password = user ? (String(subtitlesPatch.password || '') || (user === saved.user ? saved.password : '')) : '';
+      if (user && !password) throw new Error('Type the OpenSubtitles password too, or leave the user empty.');
+      const account = key ? await openSubtitlesService.check(key, user, password) : null;
+      openSubtitles = { key, user, password, account };
+    }
+    
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, realDebridUser, openSubtitles });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
     if (modules !== undefined) logger.logUserActivity('admin', 'changed the parts of the app offered', settingsService.modules());
     if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
+    if (openSubtitles) logger.logUserActivity('admin', openSubtitles.key ? 'saved the OpenSubtitles key' : 'removed the OpenSubtitles key', { account: !!openSubtitles.user });
     if (realDebridToken !== undefined) logger.logUserActivity('admin', realDebridToken ? 'saved the Real-Debrid token' : 'removed the Real-Debrid token');
     if (prowlarrUrl !== undefined || prowlarrKey !== undefined) logger.logUserActivity('admin', prowlarrVersion ? 'saved the Prowlarr connection' : 'removed the Prowlarr connection');
     
@@ -1075,6 +1090,42 @@ app.post('/api/discover/continue', async (req, res) => {
   }
 });
 
+// Subtitles for a film or episode; with the torrent playing, those made for
+// that very file come first
+app.get('/api/discover/subtitles', async (req, res) => {
+  try {
+    const title = debridTitle(req.query);
+    let file = null;
+    if (/^[A-Z0-9]{1,40}$/i.test(req.query.torrent || '')) {
+      try {
+        const ready = await debridService.state(req.query.torrent, title.target);
+        if (ready.state === 'ready') file = { url: ready.url, size: ready.size };
+      } catch (_) {}
+    }
+    const subtitles = await openSubtitlesService.search(
+      { kind: title.kind, tmdbId: title.tmdbId, season: title.target && title.target.season, episode: title.target && title.target.episode },
+      req.query.lang === 'pt' ? 'pt' : 'en',
+      file
+    );
+    res.json({ success: true, subtitles });
+  } catch (error) {
+    logger.warn('subtitles', 'Subtitle search failed', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// One subtitle, downloaded to this server; answers the address to show it
+app.post('/api/discover/subtitles/:file', async (req, res) => {
+  try {
+    if (!/^\d{1,12}$/.test(req.params.file)) throw new Error('Which subtitle?');
+    await openSubtitlesService.download(req.params.file);
+    res.json({ success: true, url: openSubtitlesService.publicPath(req.params.file) });
+  } catch (error) {
+    logger.warn('subtitles', 'Subtitle download failed', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
 // Sources played for a film, or for each episode of a series
 app.get('/api/discover/history/:kind/:id', (req, res) => {
   const kind = req.params.kind === 'tv' ? 'tv' : 'movie';
@@ -1223,6 +1274,17 @@ app.post('/api/recordings/:id/ticket', authMiddleware, (req, res) => {
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }
+});
+
+// A subtitle already downloaded, by its signed address (for a <track> or a Chromecast)
+app.get('/api/subtitles/opensubtitles/:file.vtt', (req, res) => {
+  const fileId = req.params.file;
+  if (!/^\d{1,12}$/.test(fileId) || req.query.t !== openSubtitlesService.signature(fileId)) return res.status(404).end();
+  const file = openSubtitlesService.saved(fileId);
+  if (!file) return res.status(404).end();
+  res.set('Content-Type', 'text/vtt; charset=utf-8');
+  res.set('Cache-Control', 'private, max-age=86400');
+  res.sendFile(file);
 });
 
 app.get('/api/recordings/media/:ticket', (req, res) => {

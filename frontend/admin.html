@@ -349,6 +349,12 @@
       const [rdBusy, setRdBusy] = useState(false);
       const [rdError, setRdError] = useState('');
       const [rdNote, setRdNote] = useState('');
+      const [osKey, setOsKey] = useState('');
+      const [osUser, setOsUser] = useState('');
+      const [osPassword, setOsPassword] = useState('');
+      const [osBusy, setOsBusy] = useState(false);
+      const [osError, setOsError] = useState('');
+      const [osNote, setOsNote] = useState('');
       const [loading, setLoading] = useState(true);
       const [users, setUsers] = useState([]);
       const [showModal, setShowModal] = useState(false);
@@ -581,6 +587,7 @@
           setModules(data.settings.modules);
           setLiveConversion(!!data.settings.liveConversion);
           setProwlarrUrl(data.settings.prowlarrUrl || '');
+          setOsUser(data.settings.openSubtitlesUser || '');
         } else {
           setSettingsError(data.error || 'Could not load the settings');
         }
@@ -635,7 +642,7 @@
         { id: 'library', label: 'Library', hint: 'Recordings kept on this server and converted to MP4, and the Recorded gallery. Needs ffmpeg and disk space' },
         { id: 'vod', label: 'Video club', hint: 'Also enabled per user' },
         { id: 'series', label: 'Series', hint: 'Also enabled per user' },
-        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch, with torrent sources from Prowlarr played through Real-Debrid. Needs the TMDB key, Prowlarr and Real-Debrid below' }
+        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch, with torrent sources from Prowlarr played through Real-Debrid, and subtitles from OpenSubtitles. Needs the TMDB key, Prowlarr and Real-Debrid below' }
       ];
 
       const saveCastBase = async (e) => {
@@ -721,6 +728,36 @@
         } finally {
           setRdBusy(false);
         }
+      };
+
+      // remove: forget the key and the account
+      const saveOpenSubtitles = async (remove = false) => {
+        setOsBusy(true);
+        setOsError('');
+        setOsNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ openSubtitles: remove ? { remove: true } : { key: osKey.trim(), user: osUser.trim(), password: osPassword } })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setOsKey('');
+          setOsPassword('');
+          setOsUser(data.settings.openSubtitlesUser || '');
+          setOsNote(remove ? 'OpenSubtitles removed.' : 'Accepted by OpenSubtitles and saved.');
+        } catch (err) {
+          setOsError(err.message);
+        } finally {
+          setOsBusy(false);
+        }
+      };
+
+      const osAccount = (s) => {
+        if (!s.openSubtitlesKeySet) return 'No OpenSubtitles key saved.';
+        const account = s.openSubtitlesAccount;
+        if (!account || !account.user) return 'An OpenSubtitles key is saved, without an account (fewer downloads a day).';
+        return `OpenSubtitles key and account ${account.user} saved${account.allowedDownloads ? ` · ${account.allowedDownloads} downloads a day` : ''}${account.vip ? ' · VIP' : ''}.`;
       };
 
       const rdAccount = (user) => {
@@ -1038,6 +1075,73 @@
                   {settings?.settings?.realDebridTokenSet && (
                     <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={rdBusy} onClick={() => confirm('Remove the Real-Debrid token?') && saveRdToken('')}>
                       Remove token
+                    </button>
+                  )}
+                </form>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>💬 Subtitles for Discover (OpenSubtitles)</h3>
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); saveOpenSubtitles(); }} className="settings-body">
+                  <div className="form-group">
+                    <label>OpenSubtitles API key</label>
+                    <input
+                      type="password"
+                      value={osKey}
+                      onChange={e => setOsKey(e.target.value)}
+                      placeholder={settings?.settings?.openSubtitlesKeySet ? 'Saved. Type a new one to replace it' : 'opensubtitles.com → Consumers → New consumer'}
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                    <small>
+                      The player of a Discover title finds subtitles in Portuguese and English, those made for the file
+                      playing first. Get a key at{' '}
+                      <a href="https://www.opensubtitles.com/en/consumers" target="_blank" rel="noopener noreferrer">opensubtitles.com/consumers</a>.
+                    </small>
+                  </div>
+                  <div className="form-group">
+                    <label>OpenSubtitles user (optional)</label>
+                    <input
+                      type="text"
+                      value={osUser}
+                      onChange={e => setOsUser(e.target.value)}
+                      placeholder="Your opensubtitles.com user name"
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label>OpenSubtitles password</label>
+                    <input
+                      type="password"
+                      value={osPassword}
+                      onChange={e => setOsPassword(e.target.value)}
+                      placeholder={settings?.settings?.openSubtitlesPasswordSet ? 'Saved. Type a new one to replace it' : 'Only with the user above'}
+                      autoComplete="new-password"
+                    />
+                    <small>
+                      Without an account OpenSubtitles allows a few downloads a day; with a free account, 20; VIP, more.
+                      Each subtitle is downloaded once and kept on this server. The key and password stay on this server.
+                    </small>
+                  </div>
+
+                  {settings && (
+                    <div className={`settings-status ${settings.settings.openSubtitlesKeySet ? 'ok' : 'bad'}`}>
+                      {osAccount(settings.settings)}
+                    </div>
+                  )}
+
+                  {osError && <div className="error-msg">{osError}</div>}
+                  {osNote && <div className="success-msg">{osNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={osBusy || (!osKey.trim() && !settings?.settings?.openSubtitlesKeySet)}>
+                    {osBusy ? 'Checking...' : 'Save'}
+                  </button>
+                  {settings?.settings?.openSubtitlesKeySet && (
+                    <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={osBusy} onClick={() => confirm('Remove the OpenSubtitles key and account?') && saveOpenSubtitles(true)}>
+                      Remove
                     </button>
                   )}
                 </form>

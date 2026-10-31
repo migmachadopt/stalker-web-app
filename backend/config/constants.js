@@ -60,6 +60,8 @@ module.exports = {
 
   // Discover: torrents found by Prowlarr, played through Real-Debrid
   REAL_DEBRID_API: process.env.REAL_DEBRID_API || 'https://api.real-debrid.com/rest/1.0',
+  OPENSUBTITLES_API: process.env.OPENSUBTITLES_API || 'https://api.opensubtitles.com/api/v1',
+  SUBTITLES_DIR: require('path').join(__dirname, '..', 'data', 'subtitles', 'opensubtitles'),
 
   // Video club & series catalogue
   VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes

@@ -4680,6 +4680,103 @@ video::cue {
   color: var(--text-primary);
 }
 
+/* Subtitles of a Discover title, chosen in the player */
+.subs-menu {
+  position: absolute;
+  right: 16px;
+  bottom: 96px;
+  z-index: 12;
+  width: min(440px, calc(100% - 32px));
+  max-height: min(60%, 520px);
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: var(--radius-lg);
+  background: var(--glass);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.subs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 8px 10px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.subs-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subs-item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.subs-item.on {
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.subs-item:disabled {
+  cursor: default;
+}
+
+.subs-lang {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.subs-release {
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subs-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.subs-downloads {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.7rem;
+}
+
+.subs-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 0.82rem;
+}
+
+.subs-menu .discover-spinner {
+  width: 16px;
+  height: 16px;
+  border-color: rgba(255, 255, 255, 0.2);
+  border-top-color: #fff;
+}
+
 .discover-preparing {
   display: flex;
   align-items: center;
