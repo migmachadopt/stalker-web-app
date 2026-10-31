@@ -53,7 +53,8 @@ class DebridService {
     return token;
   }
 
-  async request(method, path, { token = this.token(), form, data, headers = {}, params } = {}) {
+  // whole: the whole answer (for its headers), not only its body
+  async request(method, path, { token = this.token(), form, data, headers = {}, params, whole = false } = {}) {
     try {
       const response = await axios({
         method,
@@ -68,7 +69,7 @@ class DebridService {
         timeout: TIMEOUT,
         maxBodyLength: 20 * 1024 * 1024
       });
-      return response.data;
+      return whole ? response : response.data;
     } catch (error) {
       const body = (error.response && error.response.data) || {};
       const status = error.response && error.response.status;
@@ -276,6 +277,7 @@ class DebridService {
         if (!link) throw new Error('Real-Debrid has this torrent without the video wanted. Choose another source.');
 
         const unrestricted = await this.request('post', '/unrestrict/link', { form: { link } });
+        this.list = null; // newly ready: sources show it at once
         const value = {
           state: 'ready',
           url: unrestricted.download,
@@ -308,8 +310,34 @@ class DebridService {
 
   async remove(torrentId) {
     try {
-      await this.request('delete', `/torrents/delete/${torrentId}`);
+      await this.deleteTorrent(torrentId);
     } catch (_) {}
+  }
+
+  // ── The account, for the admin area ──────────────────────────────────────
+
+  // One page of the torrents on the account, newest first: { torrents, total }
+  async listTorrents(page, limit) {
+    const response = await this.request('get', '/torrents', { params: { page, limit }, whole: true });
+    const list = Array.isArray(response.data) ? response.data : [];
+    return {
+      total: parseInt(response.headers['x-total-count'], 10) || list.length,
+      torrents: list.map(t => ({
+        id: t.id,
+        name: t.filename || '',
+        size: t.bytes || 0,
+        status: t.status || '',
+        progress: Math.round(t.progress || 0),
+        added: t.added || '',
+        files: (t.links || []).length
+      }))
+    };
+  }
+
+  async deleteTorrent(torrentId) {
+    await this.request('delete', `/torrents/delete/${torrentId}`);
+    this.list = null;
+    for (const key of this.ready.keys()) if (key.startsWith(`${torrentId}|`)) this.ready.delete(key);
   }
 }
 

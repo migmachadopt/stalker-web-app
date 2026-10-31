@@ -2109,6 +2109,9 @@
       const castApi = useCast();
       if (castApi.loaded) castTime.current = castApi.time;
 
+      // Positions of recordings kept on the server, before one is played
+      useEffect(() => { loadServerPositions(); }, []);
+
       const media = async (job) => {
         const ticket = await api.recordingTicket(job.id);
         if (!ticket.success) throw new Error(ticket.error || 'Recording not available');
@@ -2123,6 +2126,7 @@
           url,
           // The Chromecast may be given the server's address on the home network
           castUrl: castBase ? `${castBase}${new URL(url).pathname}` : url,
+          onPosition: (position, duration, closing) => reportRecordingPosition(job.id, position, duration, closing),
           image: job.metadata ? metadataText(job.metadata).poster : ''
         };
         await open(item);
@@ -2417,9 +2421,31 @@
       return { play, open, download, playing, view };
     }
 
-    // Position reached in each recording (seconds), kept in this browser
+    // Position reached in each recording (seconds): the server's (any device),
+    // or this browser's for recordings played before the server kept them
+    const serverPositions = new Map(); // 'rec:<id>' -> { position, finished }
+    const positionsSent = {};          // id -> when it was last sent
+
+    async function loadServerPositions() {
+      try {
+        const data = await api.positions();
+        if (data.success) for (const [key, value] of Object.entries(data.positions)) serverPositions.set(key, value);
+      } catch (_) {}
+    }
+
     function savedRecordingPosition(id) {
+      const kept = serverPositions.get(`rec:${id}`);
+      if (kept) return kept.finished ? 0 : kept.position || 0;
       try { return Number(localStorage.getItem(`rec:pos:${id}`)) || 0; } catch (_) { return 0; }
+    }
+
+    // To the server at most every 15 s (at once when closing or at the end)
+    function reportRecordingPosition(id, position, duration, closing) {
+      const ending = isFinite(duration) && duration > 0 && position > duration - 90;
+      serverPositions.set(`rec:${id}`, { position: ending || position < 30 ? 0 : Math.floor(position), finished: ending });
+      if (!closing && !ending && Date.now() - (positionsSent[id] || 0) < 15000) return;
+      positionsSent[id] = Date.now();
+      api.savePosition(`rec:${id}`, position, isFinite(duration) ? duration : 0).catch(() => {});
     }
 
     function saveRecordingPosition(id, position, duration) {
@@ -2540,7 +2566,7 @@
 
       const load = async () => {
         try {
-          const result = await api.recordings();
+          const [result] = await Promise.all([api.recordings(), loadServerPositions()]);
           if (!result.success) throw new Error(result.error || 'Could not load the recordings');
           setData(result);
           setError('');
@@ -2957,9 +2983,15 @@
     // converted version, the second one offered as the other choice
     function debridItem(request, source, ready) {
       const base = { id: `discover:${request.key}`, title: request.title, subtitle: request.subtitle, image: request.image, torrent: ready.torrent };
-      const original = { ...base, url: ready.url, castType: 'video/mp4' };
+
+      // Through this server (admin Settings): its address here, and on the home
+      // network for a Chromecast when one is set
+      const address = (path) => (ready.proxied ? `${BACKEND_ORIGIN}${path}` : path);
+      const castAddress = (path) => (ready.proxied && ready.castBase ? `${ready.castBase}${path}` : address(path));
+
+      const original = { ...base, url: address(ready.url), castUrl: castAddress(ready.url), castType: 'video/mp4' };
       if (!ready.hls) return original;
-      const converted = { ...base, url: ready.hls, hls: true, castType: 'application/x-mpegurl' };
+      const converted = { ...base, url: address(ready.hls), castUrl: castAddress(ready.hls), hls: true, castType: 'application/x-mpegurl' };
 
       return browserPlaysFile(ready.filename, source.quality)
         ? { ...original, alternate: { label: 'No sound? Compatible', back: 'Original', hint: 'Real-Debrid\'s converted version, which every browser plays', onError: true, item: converted } }

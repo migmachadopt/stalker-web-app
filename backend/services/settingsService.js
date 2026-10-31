@@ -28,6 +28,9 @@
 // realDebridToken: Real-Debrid account that downloads and plays those
 // torrents (see debridService). Kept on the server too.
 //
+// debridProxy: Real-Debrid videos come through this server, so Real-Debrid
+// always sees its IP (see debridProxyService). Off unless turned on.
+//
 // openSubtitlesKey / openSubtitlesUser / openSubtitlesPassword: subtitles for
 // those films and episodes (see openSubtitlesService). The account is
 // optional; the key and password never leave the server.
@@ -225,6 +228,10 @@ class SettingsService {
 
     if (patch.prowlarrKey !== undefined) {
       next.prowlarrKey = String(patch.prowlarrKey || '').trim() || undefined;
+    }
+
+    if (patch.debridProxy !== undefined) {
+      next.debridProxy = patch.debridProxy === true || undefined;
     }
 
     if (patch.realDebridToken !== undefined) {

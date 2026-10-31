@@ -145,6 +145,15 @@ const api = {
     return this.fetch(`/recordings/${id}`, { method: 'DELETE' });
   },
   
+  // Where this user left each recording ({ 'rec:<id>': { position, finished } })
+  async positions() {
+    return this.fetch('/positions');
+  },
+  
+  async savePosition(key, position, duration) {
+    return this.fetch('/positions', { method: 'PUT', body: JSON.stringify({ key, position, duration }) });
+  },
+  
   // Discover: films and series from TMDB (lang: 'en' or 'pt')
   async discoverHome(lang) {
     return this.fetch(`/discover/home?lang=${lang}`);

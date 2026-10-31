@@ -155,4 +155,5 @@ backend/data/recordings/
 backend/data/settings.json
 backend/data/library.json
 backend/data/discover-history.json
+backend/data/positions.json
 backend/data/logs/

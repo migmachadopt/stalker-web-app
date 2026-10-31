@@ -22,6 +22,8 @@ const sourcesService = require('./services/sourcesService');
 const debridService = require('./services/debridService');
 const historyService = require('./services/historyService');
 const openSubtitlesService = require('./services/openSubtitlesService');
+const debridProxyService = require('./services/debridProxyService');
+const positionService = require('./services/positionService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -339,7 +341,7 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, openSubtitles: subtitlesPatch } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, openSubtitles: subtitlesPatch, debridProxy } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
@@ -371,12 +373,13 @@ app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res)
       openSubtitles = { key, user, password, account };
     }
     
-    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, realDebridUser, openSubtitles });
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, realDebridUser, openSubtitles, debridProxy });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
     if (modules !== undefined) logger.logUserActivity('admin', 'changed the parts of the app offered', settingsService.modules());
     if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
+    if (debridProxy !== undefined) logger.logUserActivity('admin', debridProxy ? 'turned on playing Real-Debrid through this server' : 'turned off playing Real-Debrid through this server');
     if (openSubtitles) logger.logUserActivity('admin', openSubtitles.key ? 'saved the OpenSubtitles key' : 'removed the OpenSubtitles key', { account: !!openSubtitles.user });
     if (realDebridToken !== undefined) logger.logUserActivity('admin', realDebridToken ? 'saved the Real-Debrid token' : 'removed the Real-Debrid token');
     if (prowlarrUrl !== undefined || prowlarrKey !== undefined) logger.logUserActivity('admin', prowlarrVersion ? 'saved the Prowlarr connection' : 'removed the Prowlarr connection');
@@ -1029,7 +1032,12 @@ app.get('/api/discover/sources', async (req, res) => {
         onDebrid: !!hash && ready.has(hash)
       };
     });
-    const sources = [...marked.filter(s => s.lastUsed), ...marked.filter(s => !s.lastUsed)];
+    // The one played last, then those that start at once, then the rest (each in quality order)
+    const sources = [
+      ...marked.filter(s => s.lastUsed),
+      ...marked.filter(s => !s.lastUsed && s.onDebrid),
+      ...marked.filter(s => !s.lastUsed && !s.onDebrid)
+    ];
     res.json({ success: true, sources });
   } catch (error) {
     logger.warn('sources', 'Source search failed', { error: error.message });
@@ -1154,7 +1162,13 @@ app.put('/api/discover/position', (req, res) => {
 app.get('/api/discover/play/:torrent', async (req, res) => {
   try {
     if (!/^[A-Z0-9]{1,40}$/i.test(req.params.torrent)) throw new Error('Unknown torrent');
-    res.json({ success: true, ...(await debridService.state(req.params.torrent, debridTarget(req.query))) });
+    const state = await debridService.state(req.params.torrent, debridTarget(req.query));
+
+    // Through this server, when the admin turned that on: Real-Debrid then sees one IP only
+    const ready = state.state === 'ready' && settingsService.get().debridProxy
+      ? { ...debridProxyService.wrap(state), castBase: settingsService.castBase() }
+      : state;
+    res.json({ success: true, ...ready });
   } catch (error) {
     logger.warn('debrid', 'Real-Debrid state failed', { error: error.message });
     res.status(400).json({ success: false, error: error.message });
@@ -1274,6 +1288,72 @@ app.post('/api/recordings/:id/ticket', authMiddleware, (req, res) => {
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }
+});
+
+// Real-Debrid videos through this server (see debridProxyService); the ticket
+// in the address stands for the sign-in the player cannot send
+app.get('/api/debrid/stream/:ticket', (req, res) => {
+  const entry = debridProxyService.resolve(req.params.ticket);
+  if (!entry) return res.status(404).end();
+  debridProxyService.pipe(entry.url, req, res);
+});
+
+app.get('/api/debrid/hls/:ticket/index.m3u8', (req, res) => {
+  const entry = debridProxyService.resolve(req.params.ticket);
+  if (!entry) return res.status(404).end();
+  debridProxyService.playlist(req.params.ticket, entry.url, res);
+});
+
+app.get('/api/debrid/hls/:ticket/:kind(p|s)', (req, res) => {
+  const entry = debridProxyService.resolve(req.params.ticket);
+  const url = String(req.query.u || '');
+  if (!entry || !/^https?:\/\//i.test(url) || !debridProxyService.sameSite(url, entry.url)) return res.status(404).end();
+  if (req.params.kind === 'p') debridProxyService.playlist(req.params.ticket, url, res);
+  else debridProxyService.pipe(url, req, res);
+});
+
+// Where this user left each recording, to continue on any device
+app.get('/api/positions', authMiddleware, (req, res) => {
+  res.json({ success: true, positions: positionService.all(req.user.userId) });
+});
+
+app.put('/api/positions', authMiddleware, (req, res) => {
+  const key = String(req.body.key || '');
+  const position = Number(req.body.position);
+  const duration = Number(req.body.duration);
+  if (!/^rec:[\w-]{1,80}$/.test(key) || !(position >= 0)) {
+    return res.status(400).json({ success: false, error: 'Which recording and position?' });
+  }
+  res.json({ success: true, saved: positionService.set(req.user.userId, key, position, isFinite(duration) ? duration : 0) });
+});
+
+// The Real-Debrid account, for the admin area: torrents on it, to remove old ones
+app.get('/api/admin/debrid', authMiddleware, adminMiddleware, async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 100);
+    const token = settingsService.realDebridToken();
+    if (!token) return res.json({ success: true, connected: false });
+    const [account, list] = await Promise.all([debridService.check(token), debridService.listTorrents(page, limit)]);
+    res.json({ success: true, connected: true, account, page, limit, ...list });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// ids: torrents to remove from the account
+app.post('/api/admin/debrid/delete', authMiddleware, adminMiddleware, async (req, res) => {
+  const ids = (Array.isArray(req.body.ids) ? req.body.ids : []).map(String).filter(id => /^[A-Z0-9]{1,40}$/i.test(id)).slice(0, 100);
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await debridService.deleteTorrent(id);
+    } catch (error) {
+      failed.push({ id, error: error.message });
+    }
+  }
+  logger.logUserActivity('admin', 'removed Real-Debrid torrents', { removed: ids.length - failed.length, failed: failed.length });
+  res.json({ success: failed.length === 0, removed: ids.length - failed.length, failed, error: failed.length ? failed[0].error : undefined });
 });
 
 // A subtitle already downloaded, by its signed address (for a <track> or a Chromecast)

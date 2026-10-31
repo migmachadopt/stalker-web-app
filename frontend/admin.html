@@ -125,6 +125,24 @@
     .log-fields { display: block; color: #777; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .log-data { margin: 6px 0 0; padding: 8px 10px; background: #12121f; border-radius: 6px; color: #aaa; white-space: pre-wrap; word-break: break-all; }
     .logs-more { padding: 14px; text-align: center; }
+
+    /* Real-Debrid */
+    .debrid-account { color: #888; font-weight: 400; font-size: 1rem; }
+    .debrid-row { display: grid; grid-template-columns: 28px 1fr 90px 130px 110px 80px; gap: 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid #222236; font-size: 0.85rem; }
+    .debrid-row.head { color: #888; font-size: 0.75rem; text-transform: uppercase; }
+    .debrid-row:not(.head):hover { background: #222238; }
+    .debrid-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+    .debrid-name { color: #ddd; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .debrid-muted { color: #888; }
+    .debrid-status.downloaded { color: #4caf50; }
+    .debrid-status.bad { color: #ff6464; }
+    .debrid-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid #2a2a3e; color: #888; font-size: 0.85rem; }
+    .debrid-pages { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 14px; color: #888; font-size: 0.85rem; }
+    .btn-small { padding: 5px 10px; font-size: 0.78rem; }
+    @media (max-width: 720px) {
+      .debrid-row { grid-template-columns: 24px 1fr 80px; }
+      .debrid-row > :nth-child(4), .debrid-row > :nth-child(5) { display: none; }
+    }
     @media (max-width: 720px) {
       .log-row { grid-template-columns: 64px 1fr; }
       .log-level, .log-cat { display: none; }
@@ -319,9 +337,123 @@
       );
     }
 
+    // The torrents on the Real-Debrid account, to remove old ones
+    function DebridView() {
+      const [page, setPage] = useState(1);
+      const [data, setData] = useState(null);
+      const [selected, setSelected] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [error, setError] = useState('');
+      const [note, setNote] = useState('');
+      const LIMIT = 50;
+
+      const load = async (which = page) => {
+        setBusy(true);
+        setError('');
+        try {
+          const result = await api.fetch(`/admin/debrid?page=${which}&limit=${LIMIT}`);
+          if (!result.success) throw new Error(result.error || 'Could not read Real-Debrid');
+          setData(result);
+          setSelected([]);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      useEffect(() => { load(page); }, [page]);
+
+      const remove = async (ids) => {
+        if (!ids.length || !confirm(ids.length === 1 ? 'Remove this torrent from Real-Debrid?' : `Remove ${ids.length} torrents from Real-Debrid?`)) return;
+        setBusy(true);
+        setNote('');
+        try {
+          const result = await api.fetch('/admin/debrid/delete', { method: 'POST', body: JSON.stringify({ ids }) });
+          setNote(`${result.removed} removed from Real-Debrid.`);
+          if (!result.success) setError(result.error || 'Some could not be removed');
+          const lastOnPage = data && data.torrents.length === result.removed && page > 1;
+          if (lastOnPage) setPage(page - 1); else await load(page);
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const toggle = (id) => setSelected(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
+      const all = data && data.torrents.length > 0 && selected.length === data.torrents.length;
+      const size = (bytes) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(2)} GB` : `${Math.round((bytes || 0) / 1e6)} MB`);
+      const date = (value) => (value ? new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '');
+      const status = (t) => (t.status === 'downloaded' ? 'Ready'
+        : /error|dead|virus/.test(t.status) ? `Failed (${t.status})`
+        : t.status === 'downloading' ? `Downloading ${t.progress}%`
+        : t.status.replace(/_/g, ' '));
+      const pages = data && data.total ? Math.max(1, Math.ceil(data.total / LIMIT)) : 1;
+      const until = data && data.account && data.account.expiration
+        ? new Date(data.account.expiration).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+
+      return (
+        <main className="admin-main">
+          <div className="admin-header">
+            <h2>
+              Real-Debrid
+              {data && data.account && (
+                <span className="debrid-account"> · {data.account.username}{data.account.premium ? `, premium${until ? ` until ${until}` : ''}` : ', not premium'}</span>
+              )}
+            </h2>
+            <button className="btn btn-secondary" disabled={busy} onClick={() => load(page)}>Refresh</button>
+          </div>
+
+          {error && <div className="error-msg">{error}</div>}
+          {note && <div className="success-msg">{note}</div>}
+          {data && !data.connected && <div className="error-msg">No Real-Debrid token saved. Add it in Settings.</div>}
+
+          {data && data.connected && (
+            <div className="table-container">
+              <div className="debrid-actions">
+                <span>{data.total} {data.total === 1 ? 'torrent' : 'torrents'} on the account{busy && ' · reading...'}</span>
+                {selected.length > 0 && (
+                  <button className="btn btn-danger btn-small" disabled={busy} onClick={() => remove(selected)}>
+                    Remove {selected.length} selected
+                  </button>
+                )}
+              </div>
+              <div className="debrid-row head">
+                <input type="checkbox" checked={!!all} onChange={() => setSelected(all ? [] : data.torrents.map(t => t.id))} title="Select all on this page" />
+                <span>Name</span>
+                <span>Size</span>
+                <span>State</span>
+                <span>Added</span>
+                <span></span>
+              </div>
+              {data.torrents.map(t => (
+                <div key={t.id} className="debrid-row">
+                  <input type="checkbox" checked={selected.includes(t.id)} onChange={() => toggle(t.id)} />
+                  <span className="debrid-name" title={t.name}>{t.name || t.id}</span>
+                  <span className="debrid-muted">{size(t.size)}</span>
+                  <span className={`debrid-status ${t.status === 'downloaded' ? 'downloaded' : /error|dead|virus/.test(t.status) ? 'bad' : ''}`}>{status(t)}</span>
+                  <span className="debrid-muted">{date(t.added)}</span>
+                  <button className="btn btn-secondary btn-small" disabled={busy} onClick={() => remove([t.id])}>Remove</button>
+                </div>
+              ))}
+              {data.torrents.length === 0 && <div className="groups-empty">No torrents on the account.</div>}
+              {pages > 1 && (
+                <div className="debrid-pages">
+                  <button className="btn btn-secondary btn-small" disabled={busy || page <= 1} onClick={() => setPage(page - 1)}>Previous</button>
+                  <span>Page {page} of {pages}</span>
+                  <button className="btn btn-secondary btn-small" disabled={busy || page >= pages} onClick={() => setPage(page + 1)}>Next</button>
+                </div>
+              )}
+            </div>
+          )}
+        </main>
+      );
+    }
+
     function App() {
       const [user, setUser] = useState(null);
-      const [view, setView] = useState('users'); // 'users' | 'settings' | 'logs'
+      const [view, setView] = useState('users'); // 'users' | 'settings' | 'logs' | 'debrid'
       const [settings, setSettings] = useState(null);
       const [storageRoot, setStorageRoot] = useState('');
       const [settingsBusy, setSettingsBusy] = useState(false);
@@ -760,6 +892,22 @@
         return `OpenSubtitles key and account ${account.user} saved${account.allowedDownloads ? ` · ${account.allowedDownloads} downloads a day` : ''}${account.vip ? ' · VIP' : ''}.`;
       };
 
+      const saveDebridProxy = async (on) => {
+        setRdBusy(true);
+        setRdError('');
+        setRdNote('');
+        try {
+          const data = await api.fetch('/admin/settings', { method: 'PUT', body: JSON.stringify({ debridProxy: on }) });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setRdNote(on ? 'Real-Debrid videos now come through this server.' : 'Real-Debrid videos now go straight to the viewer.');
+        } catch (err) {
+          setRdError(err.message);
+        } finally {
+          setRdBusy(false);
+        }
+      };
+
       const rdAccount = (user) => {
         if (!user) return 'A Real-Debrid token is saved.';
         const until = user.expiration ? new Date(user.expiration).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
@@ -800,6 +948,7 @@
               <li><a href="#" className={view === 'users' ? 'active' : ''} onClick={openView('users')}>👥 Users</a></li>
               <li><a href="#" className={view === 'settings' ? 'active' : ''} onClick={openView('settings')}>⚙️ Settings</a></li>
               <li><a href="#" className={view === 'logs' ? 'active' : ''} onClick={openView('logs')}>📜 Logs</a></li>
+              <li><a href="#" className={view === 'debrid' ? 'active' : ''} onClick={openView('debrid')}>⚡ Real-Debrid</a></li>
               <li><a href="/">📺 Back to Player</a></li>
               <div className="divider"></div>
               <li><a href="#" onClick={() => { localStorage.removeItem('authToken'); window.location.href = '/'; }}>🚪 Logout</a></li>
@@ -807,6 +956,7 @@
           </aside>
           
           {view === 'logs' && <LogsView />}
+          {view === 'debrid' && <DebridView />}
 
           {view === 'settings' && (
             <main className="admin-main">
@@ -1063,6 +1213,25 @@
                   {settings && (
                     <div className={`settings-status ${settings.settings.realDebridTokenSet && (!settings.settings.realDebridUser || settings.settings.realDebridUser.premium) ? 'ok' : 'bad'}`}>
                       {settings.settings.realDebridTokenSet ? rdAccount(settings.settings.realDebridUser) : 'No Real-Debrid token saved.'}
+                    </div>
+                  )}
+
+                  {settings && settings.settings.realDebridTokenSet && (
+                    <div className="form-group">
+                      <label className="checkbox-group">
+                        <input
+                          type="checkbox"
+                          checked={!!settings.settings.debridProxy}
+                          disabled={rdBusy}
+                          onChange={e => saveDebridProxy(e.target.checked)}
+                        />
+                        Play through this server
+                      </label>
+                      <small>
+                        Real-Debrid allows one IP at a time. With this on, videos come from Real-Debrid to this server and from
+                        here to the viewer, so Real-Debrid always sees this server's IP, at home or away. Away from home, the
+                        video then uses this server's upload speed.
+                      </small>
                     </div>
                   )}
 
