@@ -166,7 +166,9 @@
 
     //   captions  { on, onToggle } when the title has subtitles to show
 
-    function PlayerControls({ videoRef, title, subtitle, meta, live, seek, captions, onClose, children }) {
+    // programme (live only): { start, stop } in seconds, shown as a bar of how
+    // much of the programme on air has gone by
+    function PlayerControls({ videoRef, title, subtitle, meta, live, seek, captions, programme, onClose, children }) {
       const [playing, setPlaying] = useState(false);
       const [time, setTime] = useState(0);
       const [duration, setDuration] = useState(0);
@@ -180,6 +182,19 @@
 
       const position = seek ? seek.position : time;
       const total = seek ? seek.duration : duration;
+
+      // The programme bar moves on by itself
+      const [now, setNow] = useState(() => Date.now() / 1000);
+      useEffect(() => {
+        if (!programme) return;
+        setNow(Date.now() / 1000);
+        const timer = setInterval(() => setNow(Date.now() / 1000), 15000);
+        return () => clearInterval(timer);
+      }, [programme && programme.start, programme && programme.stop]);
+      const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      const programmeDone = programme && programme.stop > programme.start
+        ? Math.min(100, Math.max(0, ((now - programme.start) / (programme.stop - programme.start)) * 100))
+        : 0;
 
       const formatTime = (seconds) => {
         const s = Math.max(0, Math.floor(seconds || 0));
@@ -321,6 +336,14 @@
             <div className="pc-title">{title}</div>
             {subtitle && <div className="pc-subtitle">{subtitle}</div>}
             {meta && <div className="pc-meta">{meta}</div>}
+
+            {live && programme && (
+              <div className="pc-programme">
+                <span>{clock(programme.start)}</span>
+                <div className="pc-programme-bar"><span style={{ width: `${programmeDone}%` }}></span></div>
+                <span>{clock(programme.stop)}</span>
+              </div>
+            )}
 
             {!live && total > 0 && (
               <input
@@ -2737,7 +2760,7 @@
       return 'recorded';
     }
 
-    // How each channel had to be played (see liveConvert in the App), kept in this browser
+    // How each channel had to be played (see liveConvertRef in the App), kept in this browser
     function savedLiveConvert(channelId) {
       try { return localStorage.getItem(`live:convert:${channelId}`) || null; } catch (_) { return null; }
     }
@@ -2815,9 +2838,9 @@
       // sound, 'full' converts sound and picture
       const liveConversion = !!user?.features?.liveConversion;
       const liveConvertRef = useRef(null);
-      const [liveConvert, setLiveConvert] = useState(null);
       const liveBufferTimer = useRef(null);
       const liveCodecTimer = useRef(null);
+      const [videoLoading, setVideoLoading] = useState(false); // spinner while starting or buffering
       
       // Programme on air for the channel being watched live: { current, next }
       const [onAir, setOnAir] = useState(null);
@@ -3181,6 +3204,7 @@
 
       const playChannel = async (channel, isRetry = false, convert) => {
         cancelLiveRetry();
+        setVideoLoading(true);
         if (!isRetry) {
           liveRetryRef.current.count = 0;
           if (convert === undefined) setPlayerNotice('');
@@ -3196,9 +3220,6 @@
           : isRetry ? liveConvertRef.current
           : savedLiveConvert(channel.id);
         liveConvertRef.current = mode;
-        setLiveConvert(mode);
-        // Known to need converting: starting takes a little longer, say why
-        if (mode && !isRetry && convert === undefined) setPlayerNotice('Converting this channel on the server...');
         
         try {
           const data = await api.iptvGetStream(channel.id, mode);
@@ -3220,20 +3241,17 @@
         if (!liveConversion || current === 'full' || current === mode) return false;
         const next = current === 'audio' ? 'full' : mode;
         rememberLiveConvert(channel.id, next);
-        setPlayerNotice(next === 'full'
-          ? 'This browser cannot play this channel. Converting it on the server...'
-          : 'This browser cannot play the sound of this channel. Converting it on the server...');
+        setPlayerNotice('');
         playChannel(channel, false, next);
         return true;
       };
 
-      // Chosen by hand in the player: as it comes, sound converted, all converted
-      const cycleLiveConvert = () => {
-        if (!currentChannel) return;
-        const next = liveConvert === null ? 'audio' : liveConvert === 'audio' ? 'full' : null;
-        rememberLiveConvert(currentChannel.id, next);
-        setPlayerNotice('');
-        playChannel(currentChannel, false, next);
+      // The video tells when it is waiting for data and when it plays again
+      const loadingEvents = {
+        onLoadStart: () => setVideoLoading(true),
+        onWaiting: (e) => { if (!e.currentTarget._userPaused) setVideoLoading(true); },
+        onPlaying: () => setVideoLoading(false),
+        onError: () => setVideoLoading(false)
       };
 
       // The browser seems unable to play the channel. Converting on the server is
@@ -3801,17 +3819,17 @@
               {currentChannel ? (
                 <React.Fragment>
                   <div className="video-container">
-                    <video ref={videoRef} playsInline />
+                    <video ref={videoRef} playsInline {...loadingEvents} />
                   </div>
                   {playerNotice && <div className="player-notice">{playerNotice}</div>}
+                  {videoLoading && !playerNotice && <div className="player-loading"><span></span></div>}
                   <PlayerControls
                     key={`live-${currentChannel.id}`}
                     videoRef={videoRef}
                     live
                     title={currentChannel.name.replace(/\s*MOBILE\s*$/i, '')}
-                    subtitle={onAir?.current
-                      ? `${onAir.current.name} • ${clockTime(onAir.current.start)} – ${clockTime(onAir.current.stop)}`
-                      : null}
+                    subtitle={onAir?.current ? onAir.current.name : null}
+                    programme={onAir?.current || null}
                   />
                 </React.Fragment>
               ) : (
@@ -4085,9 +4103,10 @@
               {currentChannel ? (
                 <>
                   <div className="video-container">
-                    <video ref={videoRef} playsInline />
+                    <video ref={videoRef} playsInline {...loadingEvents} />
                   </div>
                   {playerNotice && <div className="player-notice">{playerNotice}</div>}
+                  {videoLoading && !playerNotice && <div className="player-loading"><span></span></div>}
                   <PlayerControls
                     key={archivePlayback ? archivePlayback.streamUrl : `live-${currentChannel.id}`}
                     videoRef={videoRef}
@@ -4096,8 +4115,9 @@
                     subtitle={archivePlayback
                       ? `${currentChannel.name} • Recording`
                       : onAir?.current
-                        ? `${onAir.current.name} • ${clockTime(onAir.current.start)} – ${clockTime(onAir.current.stop)}`
+                        ? onAir.current.name
                         : `Channel ${currentChannel.number}`}
+                    programme={!archivePlayback && onAir?.current ? onAir.current : null}
                     meta={!archivePlayback && onAir
                       ? [
                           onAir.current ? `Channel ${currentChannel.number}` : '',
@@ -4121,20 +4141,9 @@
                         )}
                       </React.Fragment>
                     ) : (
-                      <React.Fragment>
-                        {currentChannel.archive && modules.recordings && (
-                          <button className="pc-pill" onClick={() => openArchive(currentChannel)}><Icon name="rewind" size={14} /> Archive</button>
-                        )}
-                        {liveConversion && (
-                          <button
-                            className={`pc-pill ${liveConvert ? 'on' : ''}`}
-                            title="For channels this browser cannot play: convert the sound, or sound and picture, on the server"
-                            onClick={cycleLiveConvert}
-                          >
-                            {liveConvert === 'full' ? 'Converted' : liveConvert === 'audio' ? 'Sound converted' : 'Convert'}
-                          </button>
-                        )}
-                      </React.Fragment>
+                      currentChannel.archive && modules.recordings && (
+                        <button className="pc-pill" onClick={() => openArchive(currentChannel)}><Icon name="rewind" size={14} /> Archive</button>
+                      )
                     )}
                   </PlayerControls>
                 </>
