@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const axios = require('axios');
+const { spawn } = require('child_process');
 const config = require('../config/constants');
 const encryption = require('./encryption');
 const logger = require('../utils/logger');
@@ -130,6 +131,11 @@ class StreamService {
         throw new Error(`Upstream responded ${upstreamResponse.status}`);
       }
 
+      // A channel the browser cannot play goes through ffmpeg first
+      if (channelInfo.convert) {
+        return this.pipeConverted(upstreamResponse, req, res, token);
+      }
+
       const contentType = upstreamResponse.headers['content-type'] || 'video/mp2t';
 
       res.set('Content-Type', contentType);
@@ -155,6 +161,85 @@ class StreamService {
         res.status(502).send('Stream unavailable');
       }
     }
+  }
+
+  // ffmpeg settings for a live channel: 'audio' keeps the picture and only
+  // turns the sound into AAC (cheap); 'full' also re-encodes the picture as
+  // H.264, deinterlaced and at most LIVE_CONVERT_MAX_HEIGHT lines high
+  convertArgs(mode) {
+    const video = mode === 'full'
+      ? [
+          '-vf', `yadif=mode=0:deint=1,scale=-2:'min(${config.LIVE_CONVERT_MAX_HEIGHT},ih)'`,
+          '-c:v', 'libx264', '-preset', config.LIVE_CONVERT_PRESET, '-tune', 'zerolatency',
+          '-crf', '23', '-g', '50', '-pix_fmt', 'yuv420p'
+        ]
+      : ['-c:v', 'copy'];
+
+    return [
+      '-hide_banner', '-loglevel', 'error',
+      '-fflags', '+genpts+discardcorrupt',
+      '-i', 'pipe:0',
+      '-map', '0:v:0?', '-map', '0:a:0?',
+      ...video,
+      '-c:a', 'aac', '-b:a', '160k', '-ac', '2',
+      '-f', 'mpegts', 'pipe:1'
+    ];
+  }
+
+  // The provider's stream (one connection, as always) is fed to ffmpeg and
+  // what comes out goes to the browser
+  pipeConverted(upstreamResponse, req, res, token) {
+    const mode = token.channelInfo.convert;
+    const ffmpeg = spawn('ffmpeg', this.convertArgs(mode), { stdio: ['pipe', 'pipe', 'pipe'] });
+    let errors = '';
+    let closed = false;
+
+    logger.info('stream', `${token.username} - Converting channel on the server`, {
+      channel: token.channelInfo.name,
+      mode
+    });
+
+    const stop = () => {
+      if (closed) return;
+      closed = true;
+      upstreamResponse.data.destroy();
+      ffmpeg.kill('SIGKILL');
+    };
+
+    ffmpeg.on('error', (error) => {
+      logger.error('stream', 'ffmpeg could not start', { error: error.message });
+      stop();
+      if (!res.headersSent) res.status(502).send('Conversion unavailable');
+      else res.destroy();
+    });
+
+    ffmpeg.stderr.on('data', (chunk) => { errors = (errors + chunk).slice(-2000); });
+
+    ffmpeg.on('close', (code) => {
+      if (!closed && code) {
+        logger.warn('stream', 'Channel conversion stopped', { channel: token.channelInfo.name, code, error: errors.trim().slice(-300) });
+      }
+      stop();
+      res.end();
+    });
+
+    // The browser going away must not stop the server: ignore broken pipes
+    ffmpeg.stdin.on('error', () => {});
+    upstreamResponse.data.on('error', (error) => {
+      logger.warn('stream', 'Upstream stream error', { error: error.message });
+      ffmpeg.stdin.end();
+    });
+    upstreamResponse.data.pipe(ffmpeg.stdin);
+
+    res.set('Content-Type', 'video/mp2t');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    ffmpeg.stdout.pipe(res);
+
+    req.on('close', () => {
+      logger.info('stream', `${token.username} - Client disconnected`, { channel: token.channelInfo.name });
+      stop();
+    });
   }
 
   // Total size of the remote file, learned from a one-byte range request

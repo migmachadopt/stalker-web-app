@@ -4,6 +4,7 @@
 
 const config = require('../config/constants');
 const iptvService = require('./iptvService');
+const settingsService = require('./settingsService');
 
 const TYPES = ['vod', 'series'];
 
@@ -26,11 +27,13 @@ class VodService {
   }
 
   // Admins always have both sections; other users need them enabled
+  // Sections a user can open: offered by this server and enabled for the user
   getSections(user) {
     const enabled = user.enabledSections || [];
+    const modules = settingsService.modules();
     return {
-      vod: user.role === 'admin' || enabled.includes('vod'),
-      series: user.role === 'admin' || enabled.includes('series')
+      vod: modules.vod && (user.role === 'admin' || enabled.includes('vod')),
+      series: modules.series && (user.role === 'admin' || enabled.includes('series'))
     };
   }
 

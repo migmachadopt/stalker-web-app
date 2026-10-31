@@ -2977,6 +2977,12 @@ button .icon,
   background: rgba(255, 255, 255, 0.26);
 }
 
+/* An option turned on (for example a channel converted on the server) */
+.pc-pill.on {
+  background: #fff;
+  color: #000;
+}
+
 .pc-pill:disabled {
   opacity: 0.5;
   cursor: wait;

@@ -109,6 +109,13 @@
     .settings-status.ok { background: rgba(72, 187, 120, 0.15); color: #48bb78; }
     .settings-status.bad { background: rgba(255, 100, 100, 0.15); color: #ff6464; }
     .settings-body small a { color: #9aa8ff; }
+    .settings-intro { display: block; margin-bottom: 14px; color: #888; font-size: 0.8rem; }
+    .module-option { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; border-bottom: 1px solid #2a2a3e; cursor: pointer; }
+    .module-option:last-of-type { margin-bottom: 16px; }
+    .module-option input { margin-top: 3px; width: 16px; height: 16px; accent-color: #667eea; }
+    .module-option span { display: flex; flex-direction: column; gap: 2px; }
+    .module-option strong { color: #eee; font-weight: 500; }
+    .module-option small { color: #888; font-size: 0.8rem; }
     .settings-foot { display: block; margin-top: 12px; color: #666; font-size: 0.8rem; }
     
     /* Channel groups */
@@ -156,6 +163,11 @@
       const [settingsBusy, setSettingsBusy] = useState(false);
       const [settingsError, setSettingsError] = useState('');
       const [settingsNote, setSettingsNote] = useState('');
+      const [modules, setModules] = useState(null);
+      const [liveConversion, setLiveConversion] = useState(false);
+      const [modulesBusy, setModulesBusy] = useState(false);
+      const [modulesError, setModulesError] = useState('');
+      const [modulesNote, setModulesNote] = useState('');
       const [castBase, setCastBase] = useState('');
       const [castBusy, setCastBusy] = useState(false);
       const [castError, setCastError] = useState('');
@@ -393,6 +405,8 @@
           setSettings(data);
           setStorageRoot(data.folders.root);
           setCastBase(data.settings.castBaseUrl || '');
+          setModules(data.settings.modules);
+          setLiveConversion(!!data.settings.liveConversion);
         } else {
           setSettingsError(data.error || 'Could not load the settings');
         }
@@ -418,6 +432,36 @@
           setSettingsBusy(false);
         }
       };
+
+      const saveModules = async (e) => {
+        e.preventDefault();
+        setModulesBusy(true);
+        setModulesError('');
+        setModulesNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ modules, liveConversion })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setModules(data.settings.modules);
+          setLiveConversion(!!data.settings.liveConversion);
+          setModulesNote('Saved. Users see the change the next time they open or reload the app.');
+        } catch (err) {
+          setModulesError(err.message);
+        } finally {
+          setModulesBusy(false);
+        }
+      };
+
+      const MODULE_LIST = [
+        { id: 'live', label: 'Live TV', hint: 'TV channels' },
+        { id: 'recordings', label: 'Recordings', hint: 'Programmes already aired, from the guide or from a channel' },
+        { id: 'library', label: 'Library', hint: 'Recordings kept on this server and converted to MP4, and the Recorded gallery. Needs ffmpeg and disk space' },
+        { id: 'vod', label: 'Video club', hint: 'Also enabled per user' },
+        { id: 'series', label: 'Series', hint: 'Also enabled per user' }
+      ];
 
       const saveCastBase = async (e) => {
         e.preventDefault();
@@ -502,6 +546,59 @@
             <main className="admin-main">
               <div className="admin-header">
                 <h2>Settings</h2>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>🧩 Parts of the app on this server</h3>
+                </div>
+                <form onSubmit={saveModules} className="settings-body">
+                  <small className="settings-intro">
+                    Each server keeps its own choice, so a light copy can offer only some parts (for example without the library).
+                  </small>
+                  {modules && MODULE_LIST.map(module => (
+                    <label key={module.id} className="module-option">
+                      <input
+                        type="checkbox"
+                        checked={modules[module.id]}
+                        onChange={e => setModules({ ...modules, [module.id]: e.target.checked })}
+                      />
+                      <span>
+                        <strong>{module.label}</strong>
+                        <small>
+                          {module.hint}
+                          {module.id === 'library' && settings && (settings.ffmpeg ? ' · ffmpeg found on this server' : ' · ffmpeg is not installed on this server')}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+
+                  {modules && (
+                    <label className="module-option">
+                      <input
+                        type="checkbox"
+                        checked={liveConversion}
+                        disabled={!modules.live}
+                        onChange={e => setLiveConversion(e.target.checked)}
+                      />
+                      <span>
+                        <strong>Convert channels the browser cannot play</strong>
+                        <small>
+                          Live TV channels with sound or picture the browser does not support (AC3, MPEG-2, HEVC...) are
+                          converted with ffmpeg on this server. Heavy on the processor: keep it off on a Raspberry Pi
+                          {settings && (settings.ffmpeg ? ' · ffmpeg found on this server' : ' · ffmpeg is not installed on this server')}
+                        </small>
+                      </span>
+                    </label>
+                  )}
+
+                  {modulesError && <div className="error-msg">{modulesError}</div>}
+                  {modulesNote && <div className="success-msg">{modulesNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={modulesBusy || !modules}>
+                    {modulesBusy ? 'Saving...' : 'Save'}
+                  </button>
+                </form>
               </div>
 
               <div className="table-container settings-panel">

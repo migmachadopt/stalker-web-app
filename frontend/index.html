@@ -1650,7 +1650,7 @@
                           <Icon name="download" size={16} /> Download
                         </button>
                       )}
-                      {canPlaySelected && selectedState !== 'live' && (
+                      {canPlaySelected && selectedState !== 'live' && onSave && (
                         <button
                           className="vod-secondary"
                           disabled={busy}
@@ -1663,7 +1663,7 @@
                           <Icon name="box" size={16} /> Save to library
                         </button>
                       )}
-                      {selectedState === 'live' && (
+                      {selectedState === 'live' && onWatchLive && (
                         <button className="vod-secondary" onClick={() => onWatchLive(selected.channel)}><span className="live-dot"></span> Watch live</button>
                       )}
                     </div>
@@ -2724,12 +2724,40 @@
       );
     }
 
+    const ALL_MODULES = { live: true, recordings: true, library: true, vod: true, series: true };
+
+    // First section to open: the first one this server offers and the user can see
+    function firstSection(user) {
+      const modules = (user && user.modules) || ALL_MODULES;
+      const sections = (user && user.sections) || {};
+      if (modules.live) return 'tv';
+      if (modules.recordings) return 'guide';
+      if (sections.vod) return 'vod';
+      if (sections.series) return 'series';
+      return 'recorded';
+    }
+
+    // How each channel had to be played (see liveConvert in the App), kept in this browser
+    function savedLiveConvert(channelId) {
+      try { return localStorage.getItem(`live:convert:${channelId}`) || null; } catch (_) { return null; }
+    }
+
+    function rememberLiveConvert(channelId, mode) {
+      try {
+        if (mode) localStorage.setItem(`live:convert:${channelId}`, mode);
+        else localStorage.removeItem(`live:convert:${channelId}`);
+      } catch (_) {}
+    }
+
     function App() {
       // Auth state
       const [isAuthenticated, setIsAuthenticated] = useState(false);
       const [user, setUser] = useState(null);
       const [authChecked, setAuthChecked] = useState(false);
       
+      // Parts of the app this server offers (admin Settings)
+      const modules = user?.modules || ALL_MODULES;
+
       // UI state
       const [screen, setScreen] = useState('login');
       const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded'
@@ -2781,7 +2809,15 @@
       // Live playback recovery
       const [playerNotice, setPlayerNotice] = useState('');
       const liveRetryRef = useRef({ count: 0, timer: null, startedAt: 0 });
+
+      // Channels the browser cannot play may be converted on the server (admin
+      // Settings): null plays the channel as it comes, 'audio' converts only the
+      // sound, 'full' converts sound and picture
+      const liveConversion = !!user?.features?.liveConversion;
+      const liveConvertRef = useRef(null);
+      const [liveConvert, setLiveConvert] = useState(null);
       const liveBufferTimer = useRef(null);
+      const liveCodecTimer = useRef(null);
       
       // Programme on air for the channel being watched live: { current, next }
       const [onAir, setOnAir] = useState(null);
@@ -2861,7 +2897,7 @@
             
             // 🐛 FIX: Check explicitly for true boolean
             if (data.user.hasPortalConfig === true) {
-              await connectToIPTV();
+              await connectToIPTV(data.user);
             } else {
               setScreen('noconfig');
             }
@@ -2890,7 +2926,7 @@
           
           // 🐛 FIX: Check explicitly for true boolean
           if (data.user.hasPortalConfig === true) {
-            await connectToIPTV();
+            await connectToIPTV(data.user);
           } else {
             setScreen('noconfig');
           }
@@ -2986,7 +3022,8 @@
       // IPTV FUNCTIONS
       // ═══════════════════════════════════════════════════════════════════════
       
-      const connectToIPTV = async () => {
+      const connectToIPTV = async (account) => {
+        const offered = (account && account.modules) || ALL_MODULES;
         setScreen('loading'); 
         setLoadingProgress('Connecting to IPTV...');
         
@@ -3001,12 +3038,18 @@
           setIptvSessionId(sessionId);
           
           // Load channel list (stored on the server, re-read from the portal once a day)
-          setLoadingProgress('Loading channels...');
-          await loadChannelList(false);
+          if (offered.live || offered.recordings) {
+            setLoadingProgress('Loading channels...');
+            await loadChannelList(false);
+          }
           
           // Start watchdog
           startWatchdog(sessionId);
           
+          // Opens on the first part this server offers (TV channels, normally)
+          const first = firstSection(account);
+          if (first === 'guide') setGuideOpened(true);
+          setSection(first);
           setScreen('main');
         } catch (err) { 
           setError(err.message); 
@@ -3136,18 +3179,27 @@
         retry.timer = setTimeout(() => playChannel(channel, true), Math.min(retry.count * 1000, 5000));
       };
 
-      const playChannel = async (channel, isRetry = false) => {
+      const playChannel = async (channel, isRetry = false, convert) => {
         cancelLiveRetry();
         if (!isRetry) {
           liveRetryRef.current.count = 0;
-          setPlayerNotice('');
+          if (convert === undefined) setPlayerNotice('');
         }
         
         setCurrentChannel(channel);
         setArchivePlayback(null);
+
+        // A retry keeps the way the channel was being played; otherwise the
+        // way that worked for this channel before is used
+        const mode = !liveConversion ? null
+          : convert !== undefined ? convert
+          : isRetry ? liveConvertRef.current
+          : savedLiveConvert(channel.id);
+        liveConvertRef.current = mode;
+        setLiveConvert(mode);
         
         try {
-          const data = await api.iptvGetStream(channel.id);
+          const data = await api.iptvGetStream(channel.id, mode);
           
           if (data.success && data.streamUrl) {
             loadStream(data.streamUrl, data.streamType, channel);
@@ -3157,6 +3209,29 @@
         } catch (err) { 
           scheduleLiveRetry(channel);
         }
+      };
+
+      // Plays the channel again converted on the server, if this server can and
+      // it is not converted that much already. Returns whether it did.
+      const convertChannel = (channel, mode) => {
+        const current = liveConvertRef.current;
+        if (!liveConversion || current === 'full' || current === mode) return false;
+        const next = current === 'audio' ? 'full' : mode;
+        rememberLiveConvert(channel.id, next);
+        setPlayerNotice(next === 'full'
+          ? 'This browser cannot play this channel. Converting it on the server...'
+          : 'This browser cannot play the sound of this channel. Converting it on the server...');
+        playChannel(channel, false, next);
+        return true;
+      };
+
+      // Chosen by hand in the player: as it comes, sound converted, all converted
+      const cycleLiveConvert = () => {
+        if (!currentChannel) return;
+        const next = liveConvert === null ? 'audio' : liveConvert === 'audio' ? 'full' : null;
+        rememberLiveConvert(currentChannel.id, next);
+        setPlayerNotice('');
+        playChannel(currentChannel, false, next);
       };
 
       const loadStream = (streamUrl, streamType, channel) => {
@@ -3178,7 +3253,7 @@
         };
         video.onerror = () => {
           cancelLiveRetry();
-          setPlayerNotice('This channel cannot be decoded by this browser.');
+          if (!convertChannel(channel, 'full')) setPlayerNotice('This channel cannot be decoded by this browser.');
         };
 
         const absoluteUrl = streamUrl.startsWith('/')
@@ -3232,9 +3307,24 @@
             scheduleLiveRetry(channel);
           };
           player.on(mpegts.Events.LOADING_COMPLETE, onDrop);
-          player.on(mpegts.Events.ERROR, (type) => {
-            if (type === mpegts.ErrorTypes.NETWORK_ERROR) onDrop();
+          player.on(mpegts.Events.ERROR, (type, detail, info) => {
+            if (type === mpegts.ErrorTypes.NETWORK_ERROR) return onDrop();
+            if (playerRef.current !== player) return;
+            // The browser refused a codec: only the sound, or the picture too
+            const message = String((info && info.msg) || '');
+            const mode = /audio\//.test(message) ? 'audio' : 'full';
+            if (!convertChannel(channel, mode)) setPlayerNotice('This channel cannot be decoded by this browser.');
           });
+
+          // Some codecs (MPEG-2 video, MP2 sound alone) are not even recognised:
+          // nothing is described and no picture appears
+          let described = false;
+          player.on(mpegts.Events.MEDIA_INFO, () => { described = true; });
+          clearTimeout(liveCodecTimer.current);
+          liveCodecTimer.current = setTimeout(() => {
+            if (playerRef.current !== player || described || video.videoWidth > 0) return;
+            if (!convertChannel(channel, 'full')) setPlayerNotice('This channel cannot be decoded by this browser.');
+          }, 8000);
 
           player.attachMediaElement(video);
           player.load();
@@ -3791,16 +3881,24 @@
         <div className="app-layout">
           {/* Navigation Rail */}
           <div className="nav-rail">
-            <div className={`nav-item ${section === 'tv' ? 'active' : ''}`} title="TV Channels" onClick={() => switchSection('tv')}><Icon name="tv" /></div>
-            <div className={`nav-item ${section === 'guide' ? 'active' : ''}`} title="Recordings" onClick={() => switchSection('guide')}><Icon name="calendar" /></div>
-            <div className={`nav-item ${section === 'library' ? 'active' : ''}`} title="Library" onClick={() => switchSection('library')}><Icon name="box" /></div>
+            {modules.live && (
+              <div className={`nav-item ${section === 'tv' ? 'active' : ''}`} title="TV Channels" onClick={() => switchSection('tv')}><Icon name="tv" /></div>
+            )}
+            {modules.recordings && (
+              <div className={`nav-item ${section === 'guide' ? 'active' : ''}`} title="Recordings" onClick={() => switchSection('guide')}><Icon name="calendar" /></div>
+            )}
+            {modules.library && (
+              <div className={`nav-item ${section === 'library' ? 'active' : ''}`} title="Library" onClick={() => switchSection('library')}><Icon name="box" /></div>
+            )}
             {user?.sections?.vod && (
               <div className={`nav-item ${section === 'vod' ? 'active' : ''}`} title="Video Club" onClick={() => switchSection('vod')}><Icon name="film" /></div>
             )}
             {user?.sections?.series && (
               <div className={`nav-item ${section === 'series' ? 'active' : ''}`} title="Series" onClick={() => switchSection('series')}><Icon name="layers" /></div>
             )}
-            <div className={`nav-item ${section === 'recorded' ? 'active' : ''}`} title="Recorded" onClick={() => switchSection('recorded')}><Icon name="grid" /></div>
+            {modules.library && (
+              <div className={`nav-item ${section === 'recorded' ? 'active' : ''}`} title="Recorded" onClick={() => switchSection('recorded')}><Icon name="grid" /></div>
+            )}
             <div className="nav-spacer"></div>
             <div className="nav-item" title="Preferences" onClick={() => setShowPreferences(true)}><Icon name="droplet" /></div>
             <div className="nav-item" title="Change Password" onClick={() => setShowChangePassword(true)}><Icon name="lock" /></div>
@@ -3823,16 +3921,17 @@
                 genres={genres}
                 onPlay={playGuideProgram}
                 onDownload={downloadGuideProgram}
-                onSave={saveGuideProgram}
-                onWatchLive={watchLiveFromGuide}
+                onSave={modules.library ? saveGuideProgram : null}
+                onWatchLive={modules.live ? watchLiveFromGuide : null}
               />
             </div>
           )}
 
           {section === 'tv' && (
           <React.Fragment>
-          {/* Sidebar */}
-          <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
+          {/* Sidebar (the channel list; only the player is used when live TV is off
+              and a programme from the guide is playing) */}
+          <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`} style={modules.live ? undefined : { display: 'none' }}>
             <div className="sidebar-header">
               <div className="sidebar-header-top">
                 <div style={{display: 'flex', alignItems: 'center', gap: 'var(--space-sm)'}}>
@@ -3938,7 +4037,7 @@
                           {currentChannel?.id === channel.id && (
                             <div className="playing-indicator"></div>
                           )}
-                          {channel.archive && (
+                          {channel.archive && modules.recordings && (
                             <button
                               className="archive-btn"
                               title={`Archive (last ${Math.round(channel.archiveHours / 24)} days)`}
@@ -4000,15 +4099,28 @@
                         <button className="pc-pill" onClick={() => seekArchive(archivePos + 30)}>+30 s</button>
                         <button className="pc-pill" onClick={() => seekArchive(archivePos + 300)}>+5 min</button>
                         <button className="pc-icon" title="Download" onClick={() => startDownload(archivePlayback.streamUrl)}><Icon name="download" /></button>
-                        <button className="pc-pill" onClick={() => playChannel(archivePlayback.channel)}><span className="live-dot"></span> Live</button>
+                        {modules.live && (
+                          <button className="pc-pill" onClick={() => playChannel(archivePlayback.channel)}><span className="live-dot"></span> Live</button>
+                        )}
                         {archivePlayback.fromGuide && (
                           <button className="pc-pill" onClick={() => switchSection('guide')}><Icon name="calendar" size={14} /> Recordings</button>
                         )}
                       </React.Fragment>
                     ) : (
-                      currentChannel.archive && (
-                        <button className="pc-pill" onClick={() => openArchive(currentChannel)}><Icon name="rewind" size={14} /> Archive</button>
-                      )
+                      <React.Fragment>
+                        {currentChannel.archive && modules.recordings && (
+                          <button className="pc-pill" onClick={() => openArchive(currentChannel)}><Icon name="rewind" size={14} /> Archive</button>
+                        )}
+                        {liveConversion && (
+                          <button
+                            className={`pc-pill ${liveConvert ? 'on' : ''}`}
+                            title="For channels this browser cannot play: convert the sound, or sound and picture, on the server"
+                            onClick={cycleLiveConvert}
+                          >
+                            {liveConvert === 'full' ? 'Converted' : liveConvert === 'audio' ? 'Sound converted' : 'Convert'}
+                          </button>
+                        )}
+                      </React.Fragment>
                     )}
                   </PlayerControls>
                 </>
@@ -4072,7 +4184,7 @@
                             </button>
                             {available && <button type="button" title="Play" onClick={() => playArchiveProgram(program)}><Icon name="play" size={14} filled /></button>}
                             {available && <button type="button" title="Download" onClick={() => downloadArchiveProgram(program)}><Icon name="download" size={14} /></button>}
-                            {available && <button type="button" title="Save to library (trim and convert to MP4)" onClick={() => saveArchiveProgram(program)}><Icon name="box" size={14} /></button>}
+                            {available && modules.library && <button type="button" title="Save to library (trim and convert to MP4)" onClick={() => saveArchiveProgram(program)}><Icon name="box" size={14} /></button>}
                           </span>
                         </div>
                         {infoOpen && (

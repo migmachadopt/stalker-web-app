@@ -14,6 +14,11 @@
 // castBaseUrl: address of this server on the home network, given to a
 // Chromecast so videos do not travel through the internet address.
 //
+// modules: which parts of the app this server offers (see MODULES).
+//
+// liveConversion: live channels the browser cannot play are converted with
+// ffmpeg on this server. Off unless turned on: it takes a lot of processor.
+//
 // tmdbKey: key for themoviedb.org, used to read film and episode details for
 // the library (see metadataService). It never leaves the server.
 
@@ -23,6 +28,15 @@ const config = require('../config/constants');
 const logger = require('../utils/logger');
 
 const FILE = path.join(config.DATA_DIR, 'settings.json');
+
+// Parts of the app this server offers. Each server keeps its own choice, so a
+// light copy (for example on a rented server) can leave out the library.
+//   live        TV channels
+//   recordings  programmes already aired (catch-up), from the guide or a channel
+//   library     recordings kept on this server and converted to MP4, and the
+//               Recorded gallery (needs ffmpeg and disk space)
+//   vod/series  video club and series (still enabled per user too)
+const MODULES = ['live', 'recordings', 'library', 'vod', 'series'];
 
 class SettingsService {
   constructor() {
@@ -35,7 +49,17 @@ class SettingsService {
 
   get() {
     const { tmdbKey, ...shown } = this.settings;
-    return { ...shown, tmdbKeySet: !!tmdbKey };
+    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey };
+  }
+
+  // { live: true, recordings: true, ... }; everything is on unless turned off
+  modules() {
+    const saved = this.settings.modules || {};
+    return Object.fromEntries(MODULES.map(name => [name, saved[name] !== false]));
+  }
+
+  hasModule(name) {
+    return this.modules()[name];
   }
 
   // Address the Chromecast uses to fetch videos ('' = the address the app was opened at)
@@ -127,6 +151,16 @@ class SettingsService {
       next.castBaseUrl = base || undefined;
     }
 
+    if (patch.modules !== undefined) {
+      const modules = Object.fromEntries(MODULES.map(name => [name, patch.modules[name] !== false]));
+      if (!Object.values(modules).some(Boolean)) throw new Error('Keep at least one part of the app turned on');
+      next.modules = modules;
+    }
+
+    if (patch.liveConversion !== undefined) {
+      next.liveConversion = patch.liveConversion === true || undefined;
+    }
+
     if (patch.tmdbKey !== undefined) {
       next.tmdbKey = String(patch.tmdbKey || '').trim() || undefined;
     }
@@ -135,7 +169,7 @@ class SettingsService {
     fs.writeFileSync(FILE, JSON.stringify(next, null, 2));
     this.settings = next;
 
-    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot(), tmdbKey: !!next.tmdbKey });
+    logger.info('server', 'Settings updated', { storageRoot: this.storageRoot(), tmdbKey: !!next.tmdbKey, modules: next.modules });
     return this.get();
   }
 }

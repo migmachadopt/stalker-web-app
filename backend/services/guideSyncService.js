@@ -18,6 +18,7 @@ const iptvService = require('./iptvService');
 const archiveService = require('./archiveService');
 const channelListService = require('./channelListService');
 const userService = require('./userService');
+const settingsService = require('./settingsService');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -63,7 +64,8 @@ class GuideSyncService {
   }
 
   async tick() {
-    if (this.running) return;
+    // Only needed for programmes already aired (turned off on this server?)
+    if (this.running || !settingsService.hasModule('recordings')) return;
     this.running = true;
 
     try {

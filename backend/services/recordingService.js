@@ -178,6 +178,9 @@ class RecordingService {
   // ── Downloading ──────────────────────────────────────────────────────────
 
   pump() {
+    // The library turned off on this server: nothing is downloaded or converted
+    if (!settingsService.hasModule('library')) return;
+
     if (!this.download) {
       const next = this.jobs.find(job => job.state === 'queued');
       if (next) this.startDownload(next);

@@ -75,7 +75,9 @@ app.post('/api/auth/login', rateLimitMiddleware, (req, res) => {
         username: user.username,
         role: user.role,
         hasPortalConfig: !!(user.portalUrl && user.macAddress),
-        sections: vodService.getSections(user)
+        sections: vodService.getSections(user),
+        modules: settingsService.modules(),
+        features: { liveConversion: liveConversionAvailable() }
       }
     });
     
@@ -101,6 +103,8 @@ app.get('/api/auth/me', authMiddleware, (req, res) => {
         role: user.role,
         hasPortalConfig: !!(user.portalUrl && user.macAddress),
         sections: vodService.getSections(user),
+        modules: settingsService.modules(),
+        features: { liveConversion: liveConversionAvailable() },
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
       }
@@ -323,24 +327,26 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
     settings: settingsService.get(),
     defaultStorageRoot: config.RECORDINGS_DIR,
     folders,
-    storage: settingsService.check(folders.root)
+    storage: settingsService.check(folders.root),
+    ffmpeg: recordingService.status().ffmpeg
   });
 });
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey, castBaseUrl } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
     
-    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl });
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
+    if (modules !== undefined) logger.logUserActivity('admin', 'changed the parts of the app offered', settingsService.modules());
     if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
     
-    res.json({ success: true, settings, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root) });
+    res.json({ success: true, settings, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root), ffmpeg: recordingService.status().ffmpeg });
   } catch (error) {
     res.status(400).json({ success: false, error: error.message });
   }
@@ -407,6 +413,20 @@ app.post('/api/admin/users/:id/groups/refresh', authMiddleware, adminMiddleware,
 // 📺 IPTV ROUTES
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Converting live channels needs the option on and ffmpeg installed
+function liveConversionAvailable() {
+  return !!settingsService.get().liveConversion && recordingService.status().ffmpeg;
+}
+
+// Parts of the app turned off on this server (admin Settings) answer as missing
+function requireModule(...names) {
+  return (req, res, next) => {
+    const modules = settingsService.modules();
+    if (names.some(name => modules[name])) return next();
+    res.status(404).json({ success: false, error: 'This part of the app is turned off on this server' });
+  };
+}
+
 app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
   try {
     const user = userService.findUserById(req.user.userId);
@@ -432,7 +452,7 @@ app.post('/api/iptv/connect', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
+app.post('/api/iptv/channels', authMiddleware, requireModule('live', 'recordings'), async (req, res) => {
   try {
     const { sessionId, refresh } = req.body;
     
@@ -468,9 +488,10 @@ app.post('/api/iptv/channels', authMiddleware, async (req, res) => {
   }
 });
 
-app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
+app.post('/api/iptv/stream', authMiddleware, requireModule('live'), async (req, res) => {
   try {
     const { sessionId, channelId } = req.body;
+    const convert = ['audio', 'full'].includes(req.body.convert) && liveConversionAvailable() ? req.body.convert : null;
     
     const session = iptvService.getSession(sessionId);
     
@@ -496,7 +517,8 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
     const channelInfo = {
       id: channelId,
       name: channelName || 'Unknown',
-      type: streamInfo.streamType
+      type: streamInfo.streamType,
+      convert
     };
     
     const streamToken = streamService.generateStreamToken(
@@ -512,7 +534,8 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
       success: true,
       streamUrl: proxyUrl,
       channelId,
-      streamType: streamInfo.streamType
+      streamType: streamInfo.streamType,
+      convert
     });
     
   } catch (error) {
@@ -522,7 +545,7 @@ app.post('/api/iptv/stream', authMiddleware, async (req, res) => {
 });
 
 // Programme guide of one channel for one day (used by the archive browser)
-app.post('/api/iptv/epg', authMiddleware, async (req, res) => {
+app.post('/api/iptv/epg', authMiddleware, requireModule('recordings'), async (req, res) => {
   try {
     const { sessionId, channelId, date } = req.body;
     
@@ -561,7 +584,7 @@ app.post('/api/iptv/epg', authMiddleware, async (req, res) => {
 });
 
 // Search recorded programmes by title or description, one day and a few channels per call
-app.post('/api/iptv/epg/search', authMiddleware, async (req, res) => {
+app.post('/api/iptv/epg/search', authMiddleware, requireModule('recordings'), async (req, res) => {
   try {
     const { sessionId, query, date, channelIds } = req.body;
     
@@ -601,7 +624,7 @@ app.post('/api/iptv/epg/search', authMiddleware, async (req, res) => {
 });
 
 // Programme on air and the ones that follow, for the live player
-app.post('/api/iptv/epg/now', authMiddleware, async (req, res) => {
+app.post('/api/iptv/epg/now', authMiddleware, requireModule('live'), async (req, res) => {
   try {
     const { sessionId, channelId } = req.body;
     
@@ -633,7 +656,7 @@ app.post('/api/iptv/epg/now', authMiddleware, async (req, res) => {
 });
 
 // Archive (catch-up) stream for a programme or a custom interval of a channel
-app.post('/api/iptv/archive/stream', authMiddleware, async (req, res) => {
+app.post('/api/iptv/archive/stream', authMiddleware, requireModule('recordings'), async (req, res) => {
   try {
     const { sessionId, channelId, date, programId, start, duration, title } = req.body;
     
@@ -877,6 +900,8 @@ app.post('/api/iptv/disconnect', authMiddleware, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📼 LIBRARY - recordings saved on the server, trimmed and converted to MP4
 // ═══════════════════════════════════════════════════════════════════════════════
+
+app.use('/api/recordings', requireModule('library'));
 
 app.get('/api/recordings', authMiddleware, (req, res) => {
   res.json({ success: true, ...recordingService.status(), recordings: recordingService.list(req.user.userId) });

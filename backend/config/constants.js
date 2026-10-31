@@ -44,6 +44,10 @@ module.exports = {
   CONVERT_PRESET: process.env.CONVERT_PRESET || 'veryfast', // x264 speed/size trade-off
   CONVERT_CRF: process.env.CONVERT_CRF || '20',             // x264 quality (lower is better)
 
+  // Live channels the browser cannot play, converted on the server (admin Settings)
+  LIVE_CONVERT_PRESET: process.env.LIVE_CONVERT_PRESET || 'veryfast', // x264 speed/quality trade-off
+  LIVE_CONVERT_MAX_HEIGHT: 720,                                         // larger pictures are scaled down
+
   // Film and episode details for the library (see metadataService)
   TMDB_API: process.env.TMDB_API || 'https://api.themoviedb.org/3',
   TMDB_IMAGES: 'https://image.tmdb.org/t/p',

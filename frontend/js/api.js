@@ -94,8 +94,9 @@ const api = {
     return this.iptvCall('/iptv/channels', { refresh });
   },
   
-  async iptvGetStream(channelId) {
-    return this.iptvCall('/iptv/stream', { channelId });
+  // convert: 'audio' or 'full' asks the server to convert a channel the browser cannot play
+  async iptvGetStream(channelId, convert = null) {
+    return this.iptvCall('/iptv/stream', { channelId, ...(convert ? { convert } : {}) });
   },
   
   async iptvGetEpg(channelId, date) {
