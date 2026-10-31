@@ -6,7 +6,8 @@
 // title can be continued with the same source (see debridService.resume), and
 // from where it was left on any device:
 //   { [userId]: { 'movie:693134' | 'tv:136315:2:3': {
-//       torrent, hash, title, size, quality, at, position, finished } } }
+//       torrent, hash, title, size, quality, at, position, finished, watchedAt,
+//       display: { title, subtitle, image } } } }   (display: for the dashboard)
 
 const fs = require('fs');
 const path = require('path');
@@ -63,8 +64,28 @@ class HistoryService {
     const finished = duration > 0 && position > duration - 90;
     entry.position = finished || position < 30 ? 0 : Math.floor(position);
     entry.finished = finished || (entry.finished && entry.position === 0);
+    entry.watchedAt = new Date().toISOString();
     this.save();
     return true;
+  }
+
+  // Titles left part-way, newest first, for "Continue watching"
+  inProgress(userId) {
+    return Object.entries(this.data[userId] || {})
+      .filter(([, entry]) => entry.display && entry.position > 0 && !entry.finished)
+      .map(([key, entry]) => {
+        const [kind, tmdbId, season, episode] = key.split(':');
+        return {
+          key, kind, tmdbId: +tmdbId,
+          season: kind === 'tv' ? +season : undefined,
+          episode: kind === 'tv' ? +episode : undefined,
+          ...entry.display,
+          quality: entry.quality,
+          position: entry.position,
+          at: entry.watchedAt || entry.at
+        };
+      })
+      .sort((a, b) => String(b.at).localeCompare(String(a.at)));
   }
 
   save() {

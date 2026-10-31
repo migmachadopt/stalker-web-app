@@ -24,6 +24,7 @@ const historyService = require('./services/historyService');
 const openSubtitlesService = require('./services/openSubtitlesService');
 const debridProxyService = require('./services/debridProxyService');
 const positionService = require('./services/positionService');
+const dashboardService = require('./services/dashboardService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -1061,6 +1062,13 @@ const debridTitle = (body) => {
   return { kind, tmdbId, target, key: historyService.key(kind, tmdbId, target && target.season, target && target.episode) };
 };
 
+// How the dashboard shows a title: { title, subtitle, image }
+const debridDisplay = (body) => {
+  const display = body.display || {};
+  const text = (value, max) => String(value || '').slice(0, max);
+  return display.title ? { title: text(display.title, 200), subtitle: text(display.subtitle, 200), image: text(display.image, 1000) } : undefined;
+};
+
 app.post('/api/discover/play', async (req, res) => {
   try {
     const title = debridTitle(req.body);
@@ -1069,8 +1077,10 @@ app.post('/api/discover/play', async (req, res) => {
 
     // Remembered, to continue with the same source
     const release = sourcesService.release(sourceId);
+    const display = debridDisplay(req.body);
     historyService.remember(req.user.userId, title.key, {
-      torrent, hash, title: release.title || '', size: release.size || 0, quality: sourcesService.quality(release.title || '')
+      torrent, hash, title: release.title || '', size: release.size || 0, quality: sourcesService.quality(release.title || ''),
+      ...(display ? { display } : {})
     });
 
     const user = userService.findUserById(req.user.userId);
@@ -1090,7 +1100,10 @@ app.post('/api/discover/continue', async (req, res) => {
     if (!entry) throw new Error('This title was not played here yet. Choose a source.');
 
     const { torrent, hash } = await debridService.resume(entry, title.target);
-    if (torrent !== entry.torrent || hash !== entry.hash) historyService.remember(req.user.userId, title.key, { ...entry, torrent, hash: hash || entry.hash });
+    const display = debridDisplay(req.body) || entry.display;
+    if (torrent !== entry.torrent || hash !== entry.hash || display !== entry.display) {
+      historyService.remember(req.user.userId, title.key, { ...entry, torrent, hash: hash || entry.hash, ...(display ? { display } : {}) });
+    }
     res.json({ success: true, torrent, quality: entry.quality });
   } catch (error) {
     logger.warn('debrid', 'Could not continue a source', { error: error.message });
@@ -1310,6 +1323,33 @@ app.get('/api/debrid/hls/:ticket/:kind(p|s)', (req, res) => {
   if (!entry || !/^https?:\/\//i.test(url) || !debridProxyService.sameSite(url, entry.url)) return res.status(404).end();
   if (req.params.kind === 'p') debridProxyService.playlist(req.params.ticket, url, res);
   else debridProxyService.pipe(url, req, res);
+});
+
+// The home page: favourites, last channels watched and Discover titles left part-way
+app.get('/api/dashboard', authMiddleware, (req, res) => {
+  res.json({
+    success: true,
+    favorites: dashboardService.favorites(req.user.userId),
+    recentChannels: dashboardService.recentChannels(req.user.userId),
+    discover: settingsService.hasModule('discover') ? historyService.inProgress(req.user.userId).slice(0, 20) : []
+  });
+});
+
+// { type, id, name, image, data }
+app.post('/api/dashboard/favorites', authMiddleware, (req, res) => {
+  try {
+    res.json({ success: true, favorites: dashboardService.addFavorite(req.user.userId, req.body) });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/dashboard/favorites/:key', authMiddleware, (req, res) => {
+  res.json({ success: true, favorites: dashboardService.removeFavorite(req.user.userId, req.params.key) });
+});
+
+app.post('/api/dashboard/recent-channel', authMiddleware, (req, res) => {
+  res.json({ success: true, recentChannels: dashboardService.addRecentChannel(req.user.userId, req.body.id) });
 });
 
 // Where this user left each recording, to continue on any device

@@ -145,6 +145,24 @@ const api = {
     return this.fetch(`/recordings/${id}`, { method: 'DELETE' });
   },
   
+  // Home page: favourites, last channels watched, Discover titles left part-way
+  async dashboard() {
+    return this.fetch('/dashboard');
+  },
+  
+  // favorite: { type, id, name, image, data }
+  async addFavorite(favorite) {
+    return this.fetch('/dashboard/favorites', { method: 'POST', body: JSON.stringify(favorite) });
+  },
+  
+  async removeFavorite(key) {
+    return this.fetch(`/dashboard/favorites/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  },
+  
+  async recentChannel(id) {
+    return this.fetch('/dashboard/recent-channel', { method: 'POST', body: JSON.stringify({ id }) });
+  },
+  
   // Where this user left each recording ({ 'rec:<id>': { position, finished } })
   async positions() {
     return this.fetch('/positions');
@@ -186,7 +204,7 @@ const api = {
   async discoverPlay(source, request) {
     return this.fetch('/discover/play', {
       method: 'POST',
-      body: JSON.stringify({ source, kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode })
+      body: JSON.stringify({ source, kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode, display: request.display })
     });
   },
   
@@ -194,7 +212,7 @@ const api = {
   async discoverContinue(request) {
     return this.fetch('/discover/continue', {
       method: 'POST',
-      body: JSON.stringify({ kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode })
+      body: JSON.stringify({ kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode, display: request.display })
     });
   },
   

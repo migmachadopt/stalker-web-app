@@ -102,6 +102,8 @@
       trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>,
       down: <polyline points="6 9 12 15 18 9" />,
+      star: <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />,
+      home: <React.Fragment><path d="M3 10.5 12 3l9 7.5V20a1.5 1.5 0 0 1-1.5 1.5H15v-6H9v6H4.5A1.5 1.5 0 0 1 3 20z" /></React.Fragment>,
       compass: <React.Fragment><circle cx="12" cy="12" r="10" /><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" /></React.Fragment>,
       grid: <React.Fragment><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></React.Fragment>,
       cast: <React.Fragment><path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><line x1="2" y1="20" x2="2.01" y2="20" /></React.Fragment>,
@@ -156,6 +158,72 @@
         </svg>
       );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FAVOURITES (channels, video club, series, Discover), kept on the server
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // One list shared by every section; a star changes it everywhere at once
+    const favoriteStore = { list: [], loaded: false, loading: null, listeners: new Set() };
+
+    function setFavorites(list) {
+      favoriteStore.list = list;
+      favoriteStore.loaded = true;
+      favoriteStore.listeners.forEach(listener => listener(list));
+    }
+
+    function loadFavorites() {
+      if (!favoriteStore.loading) {
+        favoriteStore.loading = api.dashboard()
+          .then(data => { if (data.success) setFavorites(data.favorites); })
+          .catch(() => {})
+          .finally(() => { favoriteStore.loading = null; });
+      }
+      return favoriteStore.loading;
+    }
+
+    function useFavorites() {
+      const [list, setList] = useState(favoriteStore.list);
+      useEffect(() => {
+        favoriteStore.listeners.add(setList);
+        if (!favoriteStore.loaded) loadFavorites();
+        return () => favoriteStore.listeners.delete(setList);
+      }, []);
+
+      const has = (key) => list.some(favorite => favorite.key === key);
+
+      // favorite: { type, id, name, image, data }; shown at once, then as the server keeps it
+      const toggle = async (favorite) => {
+        const key = `${favorite.type}:${favorite.id}`;
+        const was = favoriteStore.list.some(f => f.key === key);
+        setFavorites(was ? favoriteStore.list.filter(f => f.key !== key) : [{ ...favorite, key }, ...favoriteStore.list]);
+        try {
+          const data = was ? await api.removeFavorite(key) : await api.addFavorite(favorite);
+          if (data.success) setFavorites(data.favorites);
+        } catch (_) {}
+      };
+
+      return { list, has, toggle };
+    }
+
+    function FavoriteButton({ favorite, size = 18 }) {
+      const { has, toggle } = useFavorites();
+      const on = has(`${favorite.type}:${favorite.id}`);
+      return (
+        <button
+          className={`fav-btn ${on ? 'on' : ''}`}
+          title={on ? 'Remove from favourites' : 'Add to favourites'}
+          onClick={(e) => { e.stopPropagation(); toggle(favorite); }}
+        >
+          <Icon name="star" size={size} filled={on} />
+        </button>
+      );
+    }
+
+    // What is kept of a video club or series title to open it again (short texts)
+    const favoriteItem = (item) => Object.fromEntries(Object.entries(item)
+      .filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value))
+      .map(([name, value]) => [name, typeof value === 'string' ? value.slice(0, name === 'description' ? 500 : 300) : value]));
 
     // ═══════════════════════════════════════════════════════════════════════
     // PLAYER CONTROLS - transparent overlay shared by TV, recordings and films
@@ -473,7 +541,8 @@
     const largePoster = (url) => (url || '').replace(/\/t\/p\/[^/]+\//, '/t/p/w780/');
 
     // type: 'vod' (video club) or 'series'
-    function VodBrowser({ type }) {
+    // intent: { play: continue entry } or { open: item } from the dashboard, handled once
+    function VodBrowser({ type, intent, onIntentDone }) {
       const isSeries = type === 'series';
       const sectionTitle = isSeries ? 'Series' : 'Video Club';
 
@@ -660,6 +729,14 @@
           setBusy(false);
         }
       };
+
+      // Opened from the dashboard: play where it was left, or show the title
+      useEffect(() => {
+        if (!intent) return;
+        if (intent.play) playTitle(intent.play.item, intent.play.season, intent.play.episode);
+        else if (intent.open) openDetail(intent.open);
+        if (onIntentDone) onIntentDone();
+      }, [intent]);
 
       const downloadTitle = async (item, season, episode) => {
         if (busy) return;
@@ -1042,7 +1119,10 @@
                   <img src={detail.poster || POSTER_FALLBACK} alt=""
                     onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
                   <div className="vod-detail-text">
-                    <h2>{detail.name}</h2>
+                    <div className="vod-title-row">
+                      <h2>{detail.name}</h2>
+                      <FavoriteButton favorite={{ type, id: detail.id, name: detail.name, image: detail.poster, data: { item: favoriteItem(detail) } }} />
+                    </div>
                     <div className="vod-meta">{meta(detail).map(m => <span key={m}>{m}</span>)}</div>
                     {detail.genres && <div className="vod-genres">{genreLine(detail)}</div>}
                     <p>{detail.description}</p>
@@ -2442,7 +2522,7 @@
     // To the server at most every 15 s (at once when closing or at the end)
     function reportRecordingPosition(id, position, duration, closing) {
       const ending = isFinite(duration) && duration > 0 && position > duration - 90;
-      serverPositions.set(`rec:${id}`, { position: ending || position < 30 ? 0 : Math.floor(position), finished: ending });
+      serverPositions.set(`rec:${id}`, { position: ending || position < 30 ? 0 : Math.floor(position), finished: ending, at: new Date().toISOString() });
       if (!closing && !ending && Date.now() - (positionsSent[id] || 0) < 15000) return;
       positionsSent[id] = Date.now();
       api.savePosition(`rec:${id}`, position, isFinite(duration) ? duration : 0).catch(() => {});
@@ -3021,6 +3101,39 @@
 
     const formatSpeed = (bytes) => (bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB/s` : bytes > 0 ? `${Math.round(bytes / 1e3)} KB/s` : '');
 
+    // A ready Real-Debrid item made ready for the player: where to start, the
+    // position sent to the server (at most every 15 s, and on closing) and the
+    // subtitles. Used by Discover and by the dashboard.
+    const discoverPositionSent = { at: 0 };
+
+    function discoverPlayerItem(request, item, startAt) {
+      const onPosition = (position, duration, now = false) => {
+        const ending = isFinite(duration) && position > duration - 90;
+        if (!now && !ending && Date.now() - discoverPositionSent.at < 15000) return;
+        discoverPositionSent.at = Date.now();
+        api.discoverPosition(request, position, isFinite(duration) ? duration : 0).catch(() => {});
+      };
+      const rememberKey = `discover:sub:${request.key}`;
+      const subtitles = {
+        search: () => api.discoverSubtitles(request, item.torrent, SUBTITLE_PREFERENCE),
+        fetch: async (id) => {
+          const data = await api.discoverSubtitle(id);
+          if (!data.success) throw new Error(data.error || 'Could not get this subtitle');
+          return `${BACKEND_ORIGIN}${data.url}`;
+        },
+        remembered: (() => { try { return JSON.parse(localStorage.getItem(rememberKey)); } catch (_) { return null; } })(),
+        remember: (entry) => {
+          try { entry ? localStorage.setItem(rememberKey, JSON.stringify(entry)) : localStorage.removeItem(rememberKey); } catch (_) {}
+        }
+      };
+      const extras = (one) => one && { ...one, onPosition, subtitles };
+      return {
+        ...extras(item),
+        startAt: startAt || 0,
+        alternate: item.alternate && { ...item.alternate, item: extras(item.alternate.item) }
+      };
+    }
+
     // Torrents of a film or episode, from the Prowlarr set up in the admin Settings
     function DiscoverSources({ request, onClose, onReady }) {
       const [state, setState] = useState({ loading: true, items: [], error: '' });
@@ -3171,7 +3284,8 @@
       );
     }
 
-    function DiscoverBrowser() {
+    // intent: { open: card } from the dashboard, handled once (onIntentDone)
+    function DiscoverBrowser({ intent, onIntentDone }) {
       const [rows, setRows] = useState(null);        // opening page
       const [grid, setGrid] = useState(null);        // { title, row?, query?, kind?, items, page, totalPages, total, loading }
       const [searchTerm, setSearchTerm] = useState('');
@@ -3292,16 +3406,25 @@
               key: `tv:${detail.tmdbId}:${seasonNumber}:${ep.number}`,
               kind: 'tv', tmdbId: detail.tmdbId, season: seasonNumber, episode: ep.number,
               label: `${detail.name} · ${code} · ${ep.title}`,
-              title: detail.name, subtitle: `${code} · ${ep.title}`, image: ep.still || detail.backdrop || detail.poster
+              title: detail.name, subtitle: `${code} · ${ep.title}`, image: ep.still || detail.backdrop || detail.poster,
+              display: { title: detail.name, subtitle: `${code} · ${ep.title}`, image: ep.still || detail.backdrop || detail.poster }
             }
           : {
               key: `movie:${detail.tmdbId}`, kind: 'movie', tmdbId: detail.tmdbId,
               label: [detail.name, detail.year].filter(Boolean).join(' · '),
-              title: detail.name, subtitle: detail.year || '', image: detail.backdrop || detail.poster
+              title: detail.name, subtitle: detail.year || '', image: detail.backdrop || detail.poster,
+              display: { title: detail.name, subtitle: detail.year || '', image: detail.backdrop || detail.poster }
             };
       };
 
       const findSources = (ep) => setSources(titleRequest(ep));
+
+      // Opened from the dashboard: that title's details
+      useEffect(() => {
+        if (!intent) return;
+        if (intent.open) openDetail(intent.open);
+        if (onIntentDone) onIntentDone();
+      }, [intent]);
 
       // Played before with the same source: straight to it, without searching
       const stopContinuing = () => {
@@ -3372,34 +3495,8 @@
         );
       };
 
-      // Where the viewer is goes to the server (at most every 15 s, and on closing)
-      const positionSent = useRef(0);
       const playReady = (request, item) => {
-        const onPosition = (position, duration, now = false) => {
-          const ending = isFinite(duration) && position > duration - 90;
-          if (!now && !ending && Date.now() - positionSent.current < 15000) return;
-          positionSent.current = Date.now();
-          api.discoverPosition(request, position, isFinite(duration) ? duration : 0).catch(() => {});
-        };
-        const rememberKey = `discover:sub:${request.key}`;
-        const subtitles = {
-          search: () => api.discoverSubtitles(request, item.torrent, SUBTITLE_PREFERENCE),
-          fetch: async (id) => {
-            const data = await api.discoverSubtitle(id);
-            if (!data.success) throw new Error(data.error || 'Could not get this subtitle');
-            return `${BACKEND_ORIGIN}${data.url}`;
-          },
-          remembered: (() => { try { return JSON.parse(localStorage.getItem(rememberKey)); } catch (_) { return null; } })(),
-          remember: (entry) => {
-            try { entry ? localStorage.setItem(rememberKey, JSON.stringify(entry)) : localStorage.removeItem(rememberKey); } catch (_) {}
-          }
-        };
-        const withPosition = (one) => one && { ...one, onPosition, subtitles };
-        player.open({
-          ...withPosition(item),
-          startAt: positionOf(request.key),
-          alternate: item.alternate && { ...item.alternate, item: withPosition(item.alternate.item) }
-        }).catch(err => alert(err.message));
+        player.open(discoverPlayerItem(request, item, positionOf(request.key))).catch(err => alert(err.message));
       };
 
       // Back from the player: the source just played, and the new position
@@ -3527,7 +3624,13 @@
                   <img src={detail.poster || POSTER_FALLBACK} alt=""
                     onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
                   <div className="vod-detail-text">
-                    <h2>{detail.name}</h2>
+                    <div className="vod-title-row">
+                      <h2>{detail.name}</h2>
+                      <FavoriteButton favorite={{
+                        type: 'discover', id: `${detail.kind}:${detail.tmdbId}`, name: detail.name, image: detail.poster,
+                        data: { kind: detail.kind, tmdbId: detail.tmdbId, name: detail.name, title: detail.name, poster: detail.poster, backdrop: detail.backdrop, year: detail.year }
+                      }} />
+                    </div>
                     <div className="vod-meta">{meta(detail).map(m => <span key={m}>{m}</span>)}</div>
                     {detail.genres && detail.genres.length > 0 && <div className="vod-genres">{detail.genres.slice(0, 3).join(' • ')}</div>}
                     {detail.loading ? <p>Loading...</p> : <p>{detail.overview}</p>}
@@ -3617,18 +3720,340 @@
       );
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // HOME (dashboard): shortcuts, continue watching, favourites, recent channels
+    // ═══════════════════════════════════════════════════════════════════════
+
+    const greeting = () => {
+      const hour = new Date().getHours();
+      return hour < 6 ? 'Good night' : hour < 12 ? 'Good morning' : hour < 20 ? 'Good afternoon' : 'Good evening';
+    };
+
+    // Programme on air on some channels, asked one after the other
+    function useOnAir(channelIds, enabled) {
+      const [onAir, setOnAir] = useState({});
+      const ids = channelIds.join(',');
+
+      useEffect(() => {
+        if (!enabled || !ids) return;
+        let cancelled = false;
+        (async () => {
+          for (const id of ids.split(',')) {
+            try {
+              const data = await api.iptvGetNow(id);
+              if (cancelled) return;
+              const now = Date.now() / 1000;
+              const programs = (data.success ? data.programs : []).filter(p => p.stop - p.start <= 12 * 3600);
+              setOnAir(current => ({ ...current, [id]: programs.find(p => p.start <= now && p.stop > now) || null }));
+            } catch (_) {
+              if (cancelled) return;
+            }
+          }
+        })();
+        return () => { cancelled = true; };
+      }, [ids, enabled]);
+
+      return onAir;
+    }
+
+    function HomeChannel({ channel, programme, onPlay }) {
+      const now = Date.now() / 1000;
+      const progress = programme ? Math.min(100, Math.max(0, ((now - programme.start) / (programme.stop - programme.start)) * 100)) : 0;
+      return (
+        <div className="home-channel" onClick={() => onPlay(channel)} title={channel.name}>
+          <div className="home-channel-logo">
+            <img src={channel.logo || CHANNEL_LOGO_FALLBACK} alt="" loading="lazy"
+              onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }} />
+          </div>
+          <div className="home-channel-text">
+            <div className="home-channel-name">{channel.name.replace(/\s*MOBILE\s*$/i, '')}</div>
+            <div className="home-channel-now">{programme ? programme.name : `Ch. ${channel.number}`}</div>
+            {programme && <div className="home-progress"><span style={{ width: `${progress}%` }}></span></div>}
+          </div>
+          <FavoriteButton size={16} favorite={{ type: 'channel', id: String(channel.id), name: channel.name, image: channel.logo || '', data: {} }} />
+        </div>
+      );
+    }
+
+    function HomeRow({ title, children, empty }) {
+      return (
+        <section className="home-section">
+          <h3>{title}</h3>
+          {empty ? <div className="home-empty">{empty}</div> : <div className="home-row">{children}</div>}
+        </section>
+      );
+    }
+
+    // onSection(id) opens a part of the app; onIntent({ section, ... }) opens a
+    // title there; onPlayChannel(channel) starts a channel
+    function HomeDashboard({ user, modules, channels, onSection, onPlayChannel, onIntent }) {
+      const [home, setHome] = useState(null);             // { recentChannels, discover }
+      const [recordings, setRecordings] = useState(null); // { recordings, castBase }
+      const [trending, setTrending] = useState([]);
+      const [continuing, setContinuing] = useState(null); // Discover title being prepared: { key, state, progress, error }
+      const [clock, setClock] = useState(new Date());
+      const { list: favorites } = useFavorites();
+      const player = useRecordingPlayer();
+      const run = useRef(null);
+      const sections = (user && user.sections) || {};
+
+      const load = () => {
+        api.dashboard().then(data => {
+          if (!data.success) return;
+          setHome(data);
+          setFavorites(data.favorites);
+        }).catch(() => {});
+        if (modules.library) {
+          Promise.all([api.recordings(), loadServerPositions()])
+            .then(([data]) => data.success && setRecordings(data))
+            .catch(() => {});
+        }
+      };
+
+      useEffect(() => {
+        load();
+        if (modules.discover) {
+          api.discoverHome(APP_LANGUAGE)
+            .then(data => data.success && data.rows[0] && setTrending(data.rows[0].items.slice(0, 15).map(discoverCard)))
+            .catch(() => {});
+        }
+        const timer = setInterval(() => setClock(new Date()), 30000);
+        return () => {
+          clearInterval(timer);
+          if (run.current) run.current.cancelled = true;
+        };
+      }, []);
+
+      // Back from the player: positions changed
+      useEffect(() => {
+        if (player.playing) return;
+        const timer = setTimeout(load, 600);
+        return () => clearTimeout(timer);
+      }, [!!player.playing]);
+
+      const channelsById = useMemo(() => new Map(channels.map(c => [String(c.id), c])), [channels]);
+      const recentChannels = ((home && home.recentChannels) || []).map(r => channelsById.get(String(r.id))).filter(Boolean).slice(0, 12);
+      const favoriteChannels = favorites.filter(f => f.type === 'channel').map(f => channelsById.get(String(f.id))).filter(Boolean);
+      const favoriteTitles = favorites.filter(f => f.type !== 'channel' && (f.type === 'discover' ? modules.discover : sections[f.type]));
+      const onAirIds = [...new Set([...favoriteChannels, ...recentChannels].map(c => String(c.id)))].slice(0, 20);
+      const onAir = useOnAir(onAirIds, !!modules.live && channels.length > 0);
+
+      const jobs = (recordings && recordings.recordings) || [];
+      const done = jobs.filter(job => job.state === 'done');
+      const working = jobs.filter(job => !['done', 'failed', 'cancelled'].includes(job.state));
+      const recordingImage = (job) => (job.metadata && (job.metadata.image || metadataText(job.metadata).poster)) || '';
+      // Without details: the programme name, without the date it was saved with
+      const heading = (job) => (job.metadata ? recordingHeading(job) : { title: programmeName(job), subtitle: job.channelName });
+
+      // Continue Discover titles with the same source, straight from here
+      const continueDiscover = async (entry) => {
+        const request = {
+          key: entry.key, kind: entry.kind, tmdbId: entry.tmdbId, season: entry.season, episode: entry.episode,
+          title: entry.title, subtitle: entry.subtitle, image: entry.image,
+          display: { title: entry.title, subtitle: entry.subtitle, image: entry.image }
+        };
+        if (run.current) run.current.cancelled = true;
+        const job = { cancelled: false };
+        run.current = job;
+        setContinuing({ key: entry.key, state: 'starting' });
+        try {
+          const ready = await waitForDebrid(() => api.discoverContinue(request), request, job, (data) => setContinuing({ key: entry.key, ...data }));
+          if (!ready) return;
+          setContinuing(null);
+          await player.open(discoverPlayerItem(request, debridItem(request, { quality: entry.quality || {} }, ready), entry.position));
+        } catch (err) {
+          if (!job.cancelled) setContinuing({ key: entry.key, error: err.message });
+        }
+      };
+
+      // Everything left part-way, newest first
+      const watching = [];
+      readContinue().forEach(entry => {
+        if (!sections[entry.type]) return;
+        watching.push({
+          key: `vod:${entry.key}`,
+          at: entry.updatedAt || 0,
+          title: entry.item.name,
+          subtitle: entry.season ? `${entry.season.name} · Episode ${entry.episode}` : (entry.type === 'series' ? 'Series' : 'Video club'),
+          image: largePoster(entry.item.poster),
+          progress: entry.duration ? entry.position / entry.duration : null,
+          note: entry.duration ? `${Math.max(1, Math.round((entry.duration - entry.position) / 60))} min left` : '',
+          open: () => onIntent({ section: entry.type, play: entry })
+        });
+      });
+      ((home && home.discover) || []).forEach(entry => {
+        watching.push({
+          key: `discover:${entry.key}`,
+          at: Date.parse(entry.at) || 0,
+          title: entry.title,
+          subtitle: entry.subtitle,
+          image: entry.image,
+          progress: null,
+          note: `Stopped at ${formatLength(entry.position)}`,
+          discover: entry.key,
+          open: () => continueDiscover(entry)
+        });
+      });
+      done.forEach(job => {
+        const at = savedRecordingPosition(job.id);
+        if (!(at > 0)) return;
+        const kept = serverPositions.get(`rec:${job.id}`);
+        const { title, subtitle } = heading(job);
+        watching.push({
+          key: `rec:${job.id}`,
+          at: (kept && Date.parse(kept.at)) || job.finishedAt || 0,
+          title,
+          subtitle,
+          image: recordingImage(job),
+          logo: job.channelLogo,
+          progress: job.outputDuration ? at / job.outputDuration : null,
+          note: job.outputDuration ? `${Math.max(1, Math.round((job.outputDuration - at) / 60))} min left` : '',
+          open: () => player.play(job, recordings.castBase).catch(err => alert(err.message))
+        });
+      });
+      watching.sort((a, b) => b.at - a.at);
+
+      const latest = [...done].sort((a, b) => (b.finishedAt || b.createdAt) - (a.finishedAt || a.createdAt)).slice(0, 12);
+
+      const tiles = [
+        modules.live && { id: 'tv', label: 'Live TV', icon: 'tv', hint: channels.length ? `${channels.length} channels` : 'TV channels' },
+        modules.recordings && { id: 'guide', label: 'Recordings', icon: 'calendar', hint: 'Programmes already aired' },
+        modules.library && { id: 'library', label: 'Library', icon: 'box', hint: working.length ? `${working.length} in progress` : 'Kept on this server' },
+        sections.vod && { id: 'vod', label: 'Video Club', icon: 'film', hint: 'Films from your provider' },
+        sections.series && { id: 'series', label: 'Series', icon: 'layers', hint: 'Series from your provider' },
+        modules.library && { id: 'recorded', label: 'Recorded', icon: 'grid', hint: done.length ? `${done.length} to watch` : 'Finished recordings' },
+        modules.discover && { id: 'discover', label: 'Discover', icon: 'compass', hint: 'Films and series to stream' }
+      ].filter(Boolean);
+
+      const openFavorite = (favorite) => {
+        if (favorite.type === 'discover') onIntent({ section: 'discover', open: favorite.data });
+        else if (favorite.data && favorite.data.item) onIntent({ section: favorite.type, open: favorite.data.item });
+      };
+
+      const name = user && user.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : '';
+
+      return (
+        <div className="vod-browser home">
+          <div className="home-scroll" style={{ display: player.playing ? 'none' : undefined }}>
+            <header className="home-header">
+              <div>
+                <h1>{greeting()}{name ? `, ${name}` : ''}</h1>
+                <div className="home-date">
+                  {clock.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' })}
+                  {' · '}
+                  {clock.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              </div>
+            </header>
+
+            <div className="home-tiles">
+              {tiles.map(tile => (
+                <button key={tile.id} className="home-tile" onClick={() => onSection(tile.id)}>
+                  <span className="home-tile-icon"><Icon name={tile.icon} size={22} /></span>
+                  <span className="home-tile-label">{tile.label}</span>
+                  <span className="home-tile-hint">{tile.hint}</span>
+                </button>
+              ))}
+            </div>
+
+            {watching.length > 0 && (
+              <HomeRow title="Continue watching">
+                {watching.slice(0, 20).map(item => {
+                  const mine = continuing && item.discover && continuing.key === item.discover;
+                  return (
+                    <div key={item.key} className="home-card" onClick={() => !mine && item.open()} title={item.title}>
+                      <div className="home-card-image">
+                        {item.image
+                          ? <img src={item.image} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
+                          : item.logo ? <img className="logo" src={item.logo} alt="" loading="lazy" /> : <Icon name="film" size={28} />}
+                        <span className="home-card-play"><Icon name="play" size={26} filled /></span>
+                        {item.progress !== null && <div className="home-progress on-image"><span style={{ width: `${Math.min(100, item.progress * 100)}%` }}></span></div>}
+                        {mine && !continuing.error && (
+                          <div className="home-card-status"><span className="discover-spinner"></span>{debridStatus(continuing)}</div>
+                        )}
+                      </div>
+                      <div className="home-card-title">{item.title}</div>
+                      <div className="home-card-sub">{[item.subtitle, item.note].filter(Boolean).join(' · ')}</div>
+                      {mine && continuing.error && <div className="home-card-error">{continuing.error}</div>}
+                    </div>
+                  );
+                })}
+              </HomeRow>
+            )}
+
+            <HomeRow
+              title="Favourites"
+              empty={favoriteChannels.length === 0 && favoriteTitles.length === 0
+                ? 'Add channels, films and series with the ☆ star, in the channel list and in their details.'
+                : null}
+            >
+              {favoriteChannels.map(channel => (
+                <HomeChannel key={`c${channel.id}`} channel={channel} programme={onAir[String(channel.id)]} onPlay={onPlayChannel} />
+              ))}
+              {favoriteTitles.map(favorite => (
+                <div key={favorite.key} className="home-poster" onClick={() => openFavorite(favorite)} title={favorite.name}>
+                  <img src={largePoster(favorite.image) || POSTER_FALLBACK} alt="" loading="lazy"
+                    onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
+                  <FavoriteButton size={16} favorite={favorite} />
+                  <div className="home-poster-name">{favorite.name}</div>
+                  <div className="home-poster-kind">{favorite.type === 'vod' ? 'Video club' : favorite.type === 'series' ? 'Series' : favorite.data && favorite.data.kind === 'tv' ? 'Series · Discover' : 'Film · Discover'}</div>
+                </div>
+              ))}
+            </HomeRow>
+
+            {modules.live && recentChannels.length > 0 && (
+              <HomeRow title="Last channels watched">
+                {recentChannels.map(channel => (
+                  <HomeChannel key={channel.id} channel={channel} programme={onAir[String(channel.id)]} onPlay={onPlayChannel} />
+                ))}
+              </HomeRow>
+            )}
+
+            {latest.length > 0 && (
+              <HomeRow title="Recently recorded">
+                {latest.map(job => {
+                  const { title, subtitle } = heading(job);
+                  const image = recordingImage(job);
+                  return (
+                    <div key={job.id} className="home-card" onClick={() => player.play(job, recordings.castBase).catch(err => alert(err.message))} title={title}>
+                      <div className="home-card-image">
+                        {image
+                          ? <img src={image} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
+                          : <img className="logo" src={job.channelLogo || CHANNEL_LOGO_FALLBACK} alt="" loading="lazy" />}
+                        <span className="home-card-play"><Icon name="play" size={26} filled /></span>
+                      </div>
+                      <div className="home-card-title">{title}</div>
+                      <div className="home-card-sub">{[subtitle, job.outputDuration ? `${Math.round(job.outputDuration / 60)} min` : ''].filter(Boolean).join(' · ')}</div>
+                    </div>
+                  );
+                })}
+              </HomeRow>
+            )}
+
+            {trending.length > 0 && (
+              <HomeRow title="Trending this week">
+                {trending.map(item => (
+                  <div key={item.id} className="home-poster" onClick={() => onIntent({ section: 'discover', open: item })} title={item.name}>
+                    <img src={item.poster || POSTER_FALLBACK} alt="" loading="lazy"
+                      onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
+                    <div className="home-poster-name">{item.name}</div>
+                    <div className="home-poster-kind">{[item.year, item.kind === 'tv' ? 'Series' : 'Film'].filter(Boolean).join(' · ')}</div>
+                  </div>
+                ))}
+              </HomeRow>
+            )}
+          </div>
+
+          {player.view}
+        </div>
+      );
+    }
+
     const ALL_MODULES = { live: true, recordings: true, library: true, vod: true, series: true, discover: false };
 
-    // First section to open: the first one this server offers and the user can see
-    function firstSection(user) {
-      const modules = (user && user.modules) || ALL_MODULES;
-      const sections = (user && user.sections) || {};
-      if (modules.live) return 'tv';
-      if (modules.recordings) return 'guide';
-      if (sections.vod) return 'vod';
-      if (sections.series) return 'series';
-      if (modules.discover) return 'discover';
-      return 'recorded';
+    // First section to open: the dashboard, which leads to every other part
+    function firstSection() {
+      return 'home';
     }
 
     // How each channel had to be played (see liveConvertRef in the App), kept in this browser
@@ -3654,7 +4079,8 @@
 
       // UI state
       const [screen, setScreen] = useState('login');
-      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded' | 'discover'
+      const [section, setSection] = useState('home'); // 'home' | 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded' | 'discover'
+      const [intent, setIntent] = useState(null);    // a title the dashboard opens in another section
       const [guideOpened, setGuideOpened] = useState(false); // keeps the guide mounted once visited
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
@@ -3675,7 +4101,6 @@
       const [listError, setListError] = useState('');
       const [selectedGenre, setSelectedGenre] = useState(null);
       const [showChannels, setShowChannels] = useState(false);
-      const [searchTerm, setSearchTerm] = useState('');
       
       // Player state
       const [currentChannel, setCurrentChannel] = useState(null);
@@ -3873,11 +4298,10 @@
         setHiddenGroups(0);
         setSelectedGenre(null);
         setShowChannels(false);
-        setSearchTerm('');
         setCurrentChannel(null); 
         setArchiveChannel(null);
         setArchivePlayback(null);
-        setSection('tv');
+        setSection('home');
         setGuideOpened(false);
         setScreen('login');
         setError('');
@@ -3940,10 +4364,8 @@
           // Start watchdog
           startWatchdog(sessionId);
           
-          // Opens on the first part this server offers (TV channels, normally)
-          const first = firstSection(account);
-          if (first === 'guide') setGuideOpened(true);
-          setSection(first);
+          // Opens on the dashboard
+          setSection(firstSection(account));
           setScreen('main');
         } catch (err) { 
           setError(err.message); 
@@ -3988,7 +4410,6 @@
           
           // The selected group may have been removed or hidden meanwhile
           setShowChannels(false);
-          setSearchTerm('');
         } catch (err) {
           setListError(err.message);
         } finally {
@@ -4011,35 +4432,15 @@
       const handleSelectGenre = (genreId) => { 
         setSelectedGenre(genreId); 
         setShowChannels(true); 
-        setSearchTerm(''); 
       };
       
       const handleBackToGenres = () => {
         setShowChannels(false);
-        setSearchTerm('');
       };
 
       const getGenreChannels = () => {
         if (selectedGenre === null) return [];
-        
-        let filtered = channels.filter(ch => ch.tv_genre_id === selectedGenre);
-        
-        if (searchTerm) { 
-          const term = searchTerm.toLowerCase(); 
-          filtered = filtered.filter(ch => 
-            ch.name.toLowerCase().includes(term) || 
-            ch.number.toString().includes(term)
-          ); 
-        }
-        
-        return filtered.sort((a, b) => a.number - b.number);
-      };
-
-      const getFilteredGenres = () => { 
-        if (!searchTerm) return genres; 
-        
-        const term = searchTerm.toLowerCase(); 
-        return genres.filter(g => g.name.toLowerCase().includes(term)); 
+        return channels.filter(ch => ch.tv_genre_id === selectedGenre).sort((a, b) => a.number - b.number);
       };
 
       // ═══════════════════════════════════════════════════════════════════════
@@ -4083,6 +4484,7 @@
         
         setCurrentChannel(channel);
         setArchivePlayback(null);
+        if (!isRetry && convert === undefined) api.recentChannel(channel.id).catch(() => {});
 
         // A retry keeps the way the channel was being played; otherwise the
         // way that worked for this channel before is used
@@ -4583,6 +4985,20 @@
         playChannel(channel);
       };
 
+      // From the dashboard: a channel, with its group open in the list
+      const playFromHome = (channel) => {
+        switchSection('tv');
+        setSelectedGenre(channel.tv_genre_id);
+        setShowChannels(true);
+        playChannel(channel);
+      };
+
+      // From the dashboard: a title opened (or continued) in its section
+      const openFromHome = (next) => {
+        setIntent(next);
+        switchSection(next.section);
+      };
+
       const toggleFullscreen = () => { 
         if (isFullscreen) {
           document.exitFullscreen();
@@ -4777,13 +5193,13 @@
       }
 
       const genreChannels = getGenreChannels();
-      const filteredGenres = getFilteredGenres();
       const selectedGenreInfo = genres.find(g => g.id === selectedGenre);
 
       return (
         <div className="app-layout">
           {/* Navigation Rail */}
           <div className="nav-rail">
+            <div className={`nav-item ${section === 'home' ? 'active' : ''}`} title="Home" onClick={() => switchSection('home')}><Icon name="home" /></div>
             {modules.live && (
               <div className={`nav-item ${section === 'tv' ? 'active' : ''}`} title="TV Channels" onClick={() => switchSection('tv')}><Icon name="tv" /></div>
             )}
@@ -4814,13 +5230,28 @@
             <div className="nav-item nav-item-danger" title="Sign Out" onClick={handleLogout}><Icon name="logout" /></div>
           </div>
 
-          {(section === 'vod' || section === 'series') && <VodBrowser key={section} type={section} />}
+          {section === 'home' && (
+            <HomeDashboard
+              user={user}
+              modules={modules}
+              channels={channels}
+              onSection={switchSection}
+              onPlayChannel={playFromHome}
+              onIntent={openFromHome}
+            />
+          )}
+
+          {(section === 'vod' || section === 'series') && (
+            <VodBrowser key={section} type={section} intent={intent && intent.section === section ? intent : null} onIntentDone={() => setIntent(null)} />
+          )}
 
           {section === 'library' && <LibraryBrowser />}
 
           {section === 'recorded' && <RecordedBrowser />}
 
-          {section === 'discover' && <DiscoverBrowser />}
+          {section === 'discover' && (
+            <DiscoverBrowser intent={intent && intent.section === 'discover' ? intent : null} onIntentDone={() => setIntent(null)} />
+          )}
 
           {guideOpened && (
             <div className="section-host" style={{ display: section === 'guide' ? 'flex' : 'none' }}>
@@ -4863,16 +5294,6 @@
                   <span className={isRefreshing ? 'spin' : ''}><Icon name="refresh" size={16} /></span>
                 </button>
               </div>
-              <div className="search-container">
-                <span className="search-icon"><Icon name="search" size={16} /></span>
-                <input
-                  type="text"
-                  className="search-input"
-                  placeholder={showChannels ? "Search channels..." : "Search genres..."}
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                />
-              </div>
             </div>
             
             <div className="slide-container">
@@ -4891,7 +5312,7 @@
                         </p>
                       </div>
                     )}
-                    {filteredGenres.map(genre => (
+                    {genres.map(genre => (
                       <div 
                         key={genre.id} 
                         className="group-item" 
@@ -4945,6 +5366,7 @@
                           {currentChannel?.id === channel.id && (
                             <div className="playing-indicator"></div>
                           )}
+                          <FavoriteButton size={15} favorite={{ type: 'channel', id: String(channel.id), name: channel.name, image: channel.logo || '', data: {} }} />
                           {channel.archive && modules.recordings && (
                             <button
                               className="archive-btn"
