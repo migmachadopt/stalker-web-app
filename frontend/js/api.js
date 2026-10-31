@@ -189,6 +189,14 @@ const api = {
     });
   },
   
+  // Seconds reached in a film or episode (kept on the server, for any device)
+  async discoverPosition(request, position, duration) {
+    return this.fetch('/discover/position', {
+      method: 'PUT',
+      body: JSON.stringify({ kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode, position, duration })
+    });
+  },
+  
   // Sources played for a film, or for each episode of a series
   async discoverHistory(kind, id) {
     return this.fetch(`/discover/history/${kind}/${id}`);

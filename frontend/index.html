@@ -2082,8 +2082,9 @@
     //   view                 the player, to put in the page (null when closed)
     //
     // Also plays other videos through open(item): item.hls marks an HLS
-    // address, and item.alternate ({ label, item }) another version of the same
-    // video (used too when this one fails to play)
+    // address, item.alternate ({ label, item }) another version of the same
+    // video (used too when this one fails to play), item.startAt where to
+    // start, and item.onPosition(seconds, duration) hears where the viewer is
     function useRecordingPlayer() {
       const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, castType, hls, alternate, image, casting }
       const videoRef = useRef(null);
@@ -2116,7 +2117,7 @@
 
       // Already connected to a Chromecast: it plays there straight away
       const open = async (item) => {
-        if (castApi.device) await sendToCast(item, savedRecordingPosition(item.id));
+        if (castApi.device) await sendToCast(item, startPosition(item));
         else setPlaying(item);
       };
 
@@ -2171,7 +2172,10 @@
 
       // The position on the Chromecast is remembered too
       useEffect(() => {
-        if (castApi.loaded && playing) saveRecordingPosition(playing.id, castApi.time, castApi.duration);
+        if (castApi.loaded && playing) {
+          saveRecordingPosition(playing.id, castApi.time, castApi.duration);
+          reportPosition(castApi.time, castApi.duration);
+        }
       }, [castApi.loaded && Math.floor(castApi.time / 5)]);
 
       const castPlaying = async () => {
@@ -2191,8 +2195,17 @@
         link.remove();
       };
 
+      const startPosition = (item) => (item.startAt !== undefined ? item.startAt : savedRecordingPosition(item.id));
+
+      // closing: the last position, sent even if one was sent a moment ago
+      const reportPosition = (position, duration, closing = false) => {
+        if (playing && playing.onPosition && position > 0) playing.onPosition(position, duration, closing);
+      };
+
       const closePlayer = () => {
         const video = videoRef.current;
+        if (castApi.loaded) reportPosition(castApi.time, castApi.duration, true);
+        else if (video) reportPosition(video.currentTime, video.duration, true);
         if (video) { video.pause(); video.removeAttribute('src'); video.load(); }
         if (document.fullscreenElement) document.exitFullscreen();
         if (castApi.loaded) castApi.stop();
@@ -2203,7 +2216,7 @@
       // Continue where the viewer left off (or where the Chromecast was)
       const handleLoadedMetadata = (e) => {
         const video = e.currentTarget;
-        const at = resumeAt.current || savedRecordingPosition(playing.id);
+        const at = resumeAt.current || startPosition(playing);
         resumeAt.current = 0;
         if (at > 0 && (!isFinite(video.duration) || at < video.duration - 60)) video.currentTime = at;
       };
@@ -2213,6 +2226,7 @@
         if (Math.abs(video.currentTime - lastSaved.current) < 5) return;
         lastSaved.current = video.currentTime;
         saveRecordingPosition(playing.id, video.currentTime, video.duration);
+        reportPosition(video.currentTime, video.duration);
       };
 
       const view = (
@@ -3154,19 +3168,26 @@
           if (!ready) return;
           continueRun.current = null;
           setContinuing(null);
-          playReady(debridItem(request, { quality: (entry && entry.quality) || {} }, ready));
+          playReady(request, debridItem(request, { quality: (entry && entry.quality) || {} }, ready));
         } catch (err) {
           if (!run.cancelled) setContinuing({ key: request.key, error: err.message });
         }
       };
 
+      // Position kept on the server (the browser's own, for titles played before it was)
+      const positionOf = (key) => {
+        const entry = history[key];
+        if (!entry || entry.finished) return 0;
+        return entry.position || savedRecordingPosition(`discover:${key}`);
+      };
+
       const playedLabel = (key) => {
-        const at = savedRecordingPosition(`discover:${key}`);
-        return at > 0 ? `Stopped at ${formatLength(at)}` : 'Played';
+        const at = positionOf(key);
+        return at > 0 ? `Stopped at ${formatLength(at)}` : history[key] && history[key].finished ? 'Watched' : 'Played';
       };
 
       const resumeLabel = (key) => {
-        const at = savedRecordingPosition(`discover:${key}`);
+        const at = positionOf(key);
         return at > 0 ? `Continue from ${formatLength(at)}` : 'Play again';
       };
 
@@ -3196,12 +3217,31 @@
         );
       };
 
-      const playReady = (item) => player.open(item).catch(err => alert(err.message));
+      // Where the viewer is goes to the server (at most every 15 s, and on closing)
+      const positionSent = useRef(0);
+      const playReady = (request, item) => {
+        const onPosition = (position, duration, now = false) => {
+          const ending = isFinite(duration) && position > duration - 90;
+          if (!now && !ending && Date.now() - positionSent.current < 15000) return;
+          positionSent.current = Date.now();
+          api.discoverPosition(request, position, isFinite(duration) ? duration : 0).catch(() => {});
+        };
+        const withPosition = (one) => one && { ...one, onPosition };
+        player.open({
+          ...withPosition(item),
+          startAt: positionOf(request.key),
+          alternate: item.alternate && { ...item.alternate, item: withPosition(item.alternate.item) }
+        }).catch(err => alert(err.message));
+      };
 
       // Back from the player: the source just played, and the new position
+      // (asked a moment later, after the last position has been saved)
       useEffect(() => {
         if (player.playing || !detail || detail.loading) return;
-        api.discoverHistory(detail.kind, detail.tmdbId).then(data => data.success && setHistory(data.history)).catch(() => {});
+        const timer = setTimeout(() => {
+          api.discoverHistory(detail.kind, detail.tmdbId).then(data => data.success && setHistory(data.history)).catch(() => {});
+        }, 600);
+        return () => clearTimeout(timer);
       }, [!!player.playing]);
 
       // The hero rotates through the trending titles
@@ -3401,7 +3441,7 @@
             </div>
           )}
 
-          {sources && <DiscoverSources request={sources} onClose={() => setSources(null)} onReady={playReady} />}
+          {sources && <DiscoverSources request={sources} onClose={() => setSources(null)} onReady={(item) => playReady(sources, item)} />}
           </div>
 
           {player.view}

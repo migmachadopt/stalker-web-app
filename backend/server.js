@@ -1080,9 +1080,24 @@ app.get('/api/discover/history/:kind/:id', (req, res) => {
   const kind = req.params.kind === 'tv' ? 'tv' : 'movie';
   const entries = historyService.forTitle(req.user.userId, kind, parseInt(req.params.id, 10));
   const history = Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, {
-    title: entry.title, size: entry.size, quality: entry.quality, at: entry.at
+    title: entry.title, size: entry.size, quality: entry.quality, at: entry.at,
+    position: entry.position || 0, finished: !!entry.finished
   }]));
   res.json({ success: true, history });
+});
+
+// Where the viewer is in a film or episode, to continue on any device
+app.put('/api/discover/position', (req, res) => {
+  try {
+    const title = debridTitle(req.body);
+    const position = Number(req.body.position);
+    const duration = Number(req.body.duration);
+    if (!(position >= 0)) throw new Error('Which position?');
+    const saved = historyService.setPosition(req.user.userId, title.key, position, isFinite(duration) ? duration : 0);
+    res.json({ success: saved });
+  } catch (error) {
+    res.status(400).json({ success: false, error: error.message });
+  }
 });
 
 app.get('/api/discover/play/:torrent', async (req, res) => {
