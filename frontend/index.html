@@ -4151,7 +4151,6 @@
       // Theme
       const [currentTheme, setCurrentTheme] = useState(localStorage.getItem('theme') || 'midnight');
       const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-      const [mobileSearch, setMobileSearch] = useState('');
 
       // Apply theme
       useEffect(() => {
@@ -5094,10 +5093,7 @@
         // The provider's "Mobile" group; any other enabled channel only if there is none
         const mobileGroupIds = new Set(genres.filter(g => /mobile/i.test(g.name)).map(g => g.id));
         const base = mobileGroupIds.size ? channels.filter(ch => mobileGroupIds.has(ch.tv_genre_id)) : channels;
-        const term = mobileSearch.trim().toLowerCase();
-        const list = base
-          .filter(ch => !term || ch.name.toLowerCase().includes(term) || String(ch.number).includes(term))
-          .sort((a, b) => a.number - b.number);
+        const list = [...base].sort((a, b) => a.number - b.number);
         const themes = ['midnight', 'carbon', 'ocean'];
 
         return (
@@ -5128,16 +5124,6 @@
             </div>
 
             <div className="m-bar">
-              <div className="search-container">
-                <span className="search-icon"><Icon name="search" size={16} /></span>
-                <input
-                  type="search"
-                  className="search-input"
-                  placeholder="Search channels..."
-                  value={mobileSearch}
-                  onChange={(e) => setMobileSearch(e.target.value)}
-                />
-              </div>
               <button
                 className="m-icon"
                 title={`Theme: ${currentTheme}`}
