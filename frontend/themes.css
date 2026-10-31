@@ -4648,6 +4648,38 @@ video::cue {
   flex-wrap: wrap;
 }
 
+.discover-badge.used {
+  background: var(--accent-subtle);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+  color: var(--text-primary);
+}
+
+.discover-badge.ready {
+  color: #3ecf8e;
+}
+
+.discover-actions,
+.discover-episode-actions {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.discover-used {
+  order: 3; /* under both buttons */
+  flex-basis: 100%;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+
+.discover-continue-error {
+  order: 4;
+  flex-basis: 100%;
+}
+
+.discover-played {
+  color: var(--text-primary);
+}
+
 .discover-preparing {
   display: flex;
   align-items: center;

@@ -20,6 +20,7 @@ const metadataService = require('./services/metadataService');
 const discoverService = require('./services/discoverService');
 const sourcesService = require('./services/sourcesService');
 const debridService = require('./services/debridService');
+const historyService = require('./services/historyService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -1000,7 +1001,20 @@ app.get('/api/discover/sources', async (req, res) => {
 
     // Names in English: they are what release names use
     const title = kind === 'tv' ? await discoverService.series(id, 'en') : await discoverService.movie(id, 'en');
-    const sources = await sourcesService.search(title, season, episode);
+    const found = await sourcesService.search(title, season, episode);
+
+    // Marked: the source this user played last, and those Real-Debrid already has
+    const last = historyService.get(req.user.userId, historyService.key(kind, id, season, episode));
+    const ready = await debridService.downloadedHashes();
+    const marked = found.map(source => {
+      const hash = String(sourcesService.release(source.id).infoHash || '').toLowerCase();
+      return {
+        ...source,
+        lastUsed: !!(last && ((hash && hash === last.hash) || source.title === last.title)),
+        onDebrid: !!hash && ready.has(hash)
+      };
+    });
+    const sources = [...marked.filter(s => s.lastUsed), ...marked.filter(s => !s.lastUsed)];
     res.json({ success: true, sources });
   } catch (error) {
     logger.warn('sources', 'Source search failed', { error: error.message });
@@ -1014,11 +1028,28 @@ const debridTarget = (input) => (input.kind === 'tv'
   ? { season: parseInt(input.season, 10), episode: parseInt(input.episode, 10) }
   : null);
 
+// The film or episode a play request is for: { kind, tmdbId, target, key }
+const debridTitle = (body) => {
+  const kind = body.kind === 'tv' ? 'tv' : 'movie';
+  const tmdbId = parseInt(body.tmdbId, 10);
+  const target = debridTarget(body);
+  if (!tmdbId) throw new Error('Which title?');
+  if (target && !(target.season >= 0 && target.episode > 0)) throw new Error('Choose an episode first.');
+  return { kind, tmdbId, target, key: historyService.key(kind, tmdbId, target && target.season, target && target.episode) };
+};
+
 app.post('/api/discover/play', async (req, res) => {
   try {
-    const target = debridTarget(req.body);
-    if (target && !(target.season >= 0 && target.episode > 0)) throw new Error('Choose an episode first.');
-    const torrent = await debridService.start(String(req.body.source || ''), target);
+    const title = debridTitle(req.body);
+    const sourceId = String(req.body.source || '');
+    const { torrent, hash } = await debridService.start(sourceId, title.target);
+
+    // Remembered, to continue with the same source
+    const release = sourcesService.release(sourceId);
+    historyService.remember(req.user.userId, title.key, {
+      torrent, hash, title: release.title || '', size: release.size || 0, quality: sourcesService.quality(release.title || '')
+    });
+
     const user = userService.findUserById(req.user.userId);
     logger.logUserActivity(user ? user.username : req.user.userId, 'started a Discover source', { torrent });
     res.json({ success: true, torrent });
@@ -1026,6 +1057,32 @@ app.post('/api/discover/play', async (req, res) => {
     logger.warn('debrid', 'Could not start a source', { error: error.message });
     res.status(400).json({ success: false, error: error.message });
   }
+});
+
+// The source played last for a film or episode, played again
+app.post('/api/discover/continue', async (req, res) => {
+  try {
+    const title = debridTitle(req.body);
+    const entry = historyService.get(req.user.userId, title.key);
+    if (!entry) throw new Error('This title was not played here yet. Choose a source.');
+
+    const { torrent, hash } = await debridService.resume(entry, title.target);
+    if (torrent !== entry.torrent || hash !== entry.hash) historyService.remember(req.user.userId, title.key, { ...entry, torrent, hash: hash || entry.hash });
+    res.json({ success: true, torrent, quality: entry.quality });
+  } catch (error) {
+    logger.warn('debrid', 'Could not continue a source', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Sources played for a film, or for each episode of a series
+app.get('/api/discover/history/:kind/:id', (req, res) => {
+  const kind = req.params.kind === 'tv' ? 'tv' : 'movie';
+  const entries = historyService.forTitle(req.user.userId, kind, parseInt(req.params.id, 10));
+  const history = Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, {
+    title: entry.title, size: entry.size, quality: entry.quality, at: entry.at
+  }]));
+  res.json({ success: true, history });
 });
 
 app.get('/api/discover/play/:torrent', async (req, res) => {

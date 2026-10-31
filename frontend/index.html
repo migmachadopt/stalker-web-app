@@ -2829,6 +2829,27 @@
         : { ...converted, alternate: { label: 'Original quality', back: 'Compatible', hint: 'The file itself (may play without sound in this browser)', item: original } };
     }
 
+    // Hands a torrent to Real-Debrid (start() resolves to { torrent }) and waits
+    // until it is ready, telling onState how it goes. run.cancelled stops it.
+    async function waitForDebrid(start, request, run, onState) {
+      const started = await start();
+      if (!started.success) throw new Error(started.error || 'Could not start this source');
+
+      while (!run.cancelled) {
+        const data = await api.discoverPlayState(started.torrent, request);
+        if (run.cancelled) return null;
+        if (!data.success) throw new Error(data.error || 'Real-Debrid did not answer');
+        if (data.state === 'ready') return data;
+        onState(data);
+        await new Promise(resolve => setTimeout(resolve, data.state === 'downloading' ? 4000 : 2000));
+      }
+      return null;
+    }
+
+    const debridStatus = (state) => (state.state === 'downloading'
+      ? `Downloading on Real-Debrid ${state.progress || 0}%${state.speed ? ` · ${formatSpeed(state.speed)}` : ''}`
+      : state.state === 'converting' ? 'Reading the torrent...' : 'Sending to Real-Debrid...');
+
     const formatSpeed = (bytes) => (bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB/s` : bytes > 0 ? `${Math.round(bytes / 1e3)} KB/s` : '');
 
     // Torrents of a film or episode, from the Prowlarr set up in the admin Settings
@@ -2851,22 +2872,11 @@
         setPreparing({ id: item.id, state: 'starting' });
 
         try {
-          const started = await api.discoverPlay(item.id, request);
-          if (!started.success) throw new Error(started.error || 'Could not start this source');
-
-          while (!run.cancelled) {
-            const data = await api.discoverPlayState(started.torrent, request);
-            if (run.cancelled) return;
-            if (!data.success) throw new Error(data.error || 'Real-Debrid did not answer');
-            if (data.state === 'ready') {
-              setPreparing(null);
-              polling.current = null;
-              onReady(debridItem(request, item, data));
-              return;
-            }
-            setPreparing({ id: item.id, ...data });
-            await new Promise(resolve => setTimeout(resolve, data.state === 'downloading' ? 4000 : 2000));
-          }
+          const ready = await waitForDebrid(() => api.discoverPlay(item.id, request), request, run, (data) => setPreparing({ id: item.id, ...data }));
+          if (!ready) return;
+          setPreparing(null);
+          polling.current = null;
+          onReady(debridItem(request, item, ready));
         } catch (err) {
           if (!run.cancelled) setPreparing({ id: item.id, error: err.message });
         }
@@ -2948,6 +2958,8 @@
                 <div key={item.id} className={`discover-source ${item.quality.cam ? 'cam' : ''}`}>
                   <div className="discover-source-text">
                     <div className="discover-source-badges">
+                      {item.lastUsed && <span className="discover-badge used" title="The source you played last for this title">Last used</span>}
+                      {item.onDebrid && <span className="discover-badge ready" title="Already on your Real-Debrid: starts at once">On Real-Debrid</span>}
                       {badges(item).map(b => (
                         <span key={b} className={`discover-badge ${b === item.quality.resolution ? 'strong' : b === 'CAM' ? 'warn' : ''}`} title={b === 'CAM' ? 'Filmed in a cinema' : undefined}>{b}</span>
                       ))}
@@ -2965,11 +2977,7 @@
                   {preparing && preparing.id === item.id && !preparing.error ? (
                     <div className="discover-preparing">
                       <span className="discover-spinner"></span>
-                      <span>
-                        {preparing.state === 'downloading'
-                          ? `Downloading on Real-Debrid ${preparing.progress || 0}%${preparing.speed ? ` · ${formatSpeed(preparing.speed)}` : ''}`
-                          : preparing.state === 'converting' ? 'Reading the torrent...' : 'Sending to Real-Debrid...'}
-                      </span>
+                      <span>{debridStatus(preparing)}</span>
                       <button className="vod-secondary" onClick={cancel}>Cancel</button>
                     </div>
                   ) : (
@@ -3005,6 +3013,9 @@
       const [selectedEpisode, setSelectedEpisode] = useState(null);
       const [sources, setSources] = useState(null);  // the film or episode whose sources are open
       const player = useRecordingPlayer();
+      const [history, setHistory] = useState({});      // key -> { title, quality, size, at } of the title open
+      const [continuing, setContinuing] = useState(null); // { key, state, progress, speed, error }
+      const continueRun = useRef(null);
       const [heroIndex, setHeroIndex] = useState(0);
       const [error, setError] = useState('');
       const [detailError, setDetailError] = useState('');
@@ -3058,6 +3069,11 @@
         setSeason(null);
         setSeasonNumber(null);
         setSelectedEpisode(null);
+        setHistory({});
+        stopContinuing();
+        api.discoverHistory(card.kind, card.tmdbId)
+          .then(data => data.success && setHistory(data.history))
+          .catch(() => {});
         try {
           const data = await api.discoverTitle(card.kind, card.tmdbId, APP_LANGUAGE);
           if (!data.success) throw new Error(data.error || 'Could not load this title');
@@ -3100,9 +3116,9 @@
         return () => window.removeEventListener('keydown', onKey);
       }, [!!detail, !!grid, !!sources, !!player.playing]);
 
-      const findSources = (ep) => {
+      const titleRequest = (ep) => {
         const code = ep && `S${String(seasonNumber).padStart(2, '0')}E${String(ep.number).padStart(2, '0')}`;
-        setSources(ep
+        return ep
           ? {
               key: `tv:${detail.tmdbId}:${seasonNumber}:${ep.number}`,
               kind: 'tv', tmdbId: detail.tmdbId, season: seasonNumber, episode: ep.number,
@@ -3113,10 +3129,80 @@
               key: `movie:${detail.tmdbId}`, kind: 'movie', tmdbId: detail.tmdbId,
               label: [detail.name, detail.year].filter(Boolean).join(' · '),
               title: detail.name, subtitle: detail.year || '', image: detail.backdrop || detail.poster
-            });
+            };
+      };
+
+      const findSources = (ep) => setSources(titleRequest(ep));
+
+      // Played before with the same source: straight to it, without searching
+      const stopContinuing = () => {
+        if (continueRun.current) continueRun.current.cancelled = true;
+        continueRun.current = null;
+        setContinuing(null);
+      };
+      useEffect(() => () => { if (continueRun.current) continueRun.current.cancelled = true; }, []);
+
+      const continueWith = async (ep) => {
+        const request = titleRequest(ep);
+        const entry = history[request.key];
+        stopContinuing();
+        const run = { cancelled: false };
+        continueRun.current = run;
+        setContinuing({ key: request.key, state: 'starting' });
+        try {
+          const ready = await waitForDebrid(() => api.discoverContinue(request), request, run, (data) => setContinuing({ key: request.key, ...data }));
+          if (!ready) return;
+          continueRun.current = null;
+          setContinuing(null);
+          playReady(debridItem(request, { quality: (entry && entry.quality) || {} }, ready));
+        } catch (err) {
+          if (!run.cancelled) setContinuing({ key: request.key, error: err.message });
+        }
+      };
+
+      const playedLabel = (key) => {
+        const at = savedRecordingPosition(`discover:${key}`);
+        return at > 0 ? `Stopped at ${formatLength(at)}` : 'Played';
+      };
+
+      const resumeLabel = (key) => {
+        const at = savedRecordingPosition(`discover:${key}`);
+        return at > 0 ? `Continue from ${formatLength(at)}` : 'Play again';
+      };
+
+      // The Continue button, or how it is going, for a film or episode played before
+      const continueControls = (ep) => {
+        const key = titleRequest(ep).key;
+        const entry = history[key];
+        if (!entry) return null;
+        const mine = continuing && continuing.key === key;
+        const used = [entry.quality && entry.quality.resolution, entry.quality && entry.quality.source, formatBytes(entry.size)].filter(Boolean).join(' · ');
+        return (
+          <React.Fragment>
+            {mine && !continuing.error ? (
+              <div className="discover-preparing">
+                <span className="discover-spinner"></span>
+                <span>{debridStatus(continuing)}</span>
+                <button className="vod-secondary" onClick={(e) => { e.stopPropagation(); stopContinuing(); }}>Cancel</button>
+              </div>
+            ) : (
+              <button className="vod-play" title={entry.title} onClick={(e) => { e.stopPropagation(); continueWith(ep); }}>
+                <Icon name="play" size={16} /> {resumeLabel(key)}
+              </button>
+            )}
+            {used && <span className="discover-used" title={entry.title}>Same source as before: {used}</span>}
+            {mine && continuing.error && <div className="error-msg discover-continue-error">{continuing.error}</div>}
+          </React.Fragment>
+        );
       };
 
       const playReady = (item) => player.open(item).catch(err => alert(err.message));
+
+      // Back from the player: the source just played, and the new position
+      useEffect(() => {
+        if (player.playing || !detail || detail.loading) return;
+        api.discoverHistory(detail.kind, detail.tmdbId).then(data => data.success && setHistory(data.history)).catch(() => {});
+      }, [!!player.playing]);
 
       // The hero rotates through the trending titles
       const heroItems = rows && rows[0] ? rows[0].items.filter(item => item.backdrop).slice(0, 6) : [];
@@ -3241,9 +3327,10 @@
                     {detail.cast && detail.cast.length > 0 && <div className="vod-credits"><strong>Cast</strong> {detail.cast.join(', ')}</div>}
 
                     {detail.kind === 'movie' && !detail.loading && !detailError && (
-                      <div className="vod-actions">
-                        <button className="vod-play" onClick={() => findSources(null)}>
-                          <Icon name="search" size={16} /> Find sources
+                      <div className="vod-actions discover-actions">
+                        {continueControls(null)}
+                        <button className={history[titleRequest(null).key] ? 'vod-secondary' : 'vod-play'} onClick={() => findSources(null)}>
+                          <Icon name="search" size={16} /> {history[titleRequest(null).key] ? 'Other sources' : 'Find sources'}
                         </button>
                       </div>
                     )}
@@ -3291,12 +3378,14 @@
                                 </div>
                                 <div className="rec-episode-sub">
                                   {[episodeDate(ep.date), ep.runtime ? `${ep.runtime} min` : '', ep.rating ? `★ ${ep.rating}` : ''].filter(Boolean).join(' · ')}
+                                  {history[titleRequest(ep).key] && <span className="discover-played"> · {playedLabel(titleRequest(ep).key)}</span>}
                                 </div>
                                 {ep.overview && <div className="rec-episode-overview">{ep.overview}</div>}
                                 {chosen && (
                                   <div className="vod-actions discover-episode-actions">
-                                    <button className="vod-play" onClick={(e) => { e.stopPropagation(); findSources(ep); }}>
-                                      <Icon name="search" size={16} /> Find sources
+                                    {continueControls(ep)}
+                                    <button className={history[titleRequest(ep).key] ? 'vod-secondary' : 'vod-play'} onClick={(e) => { e.stopPropagation(); findSources(ep); }}>
+                                      <Icon name="search" size={16} /> {history[titleRequest(ep).key] ? 'Other sources' : 'Find sources'}
                                     </button>
                                   </div>
                                 )}

@@ -10,6 +10,10 @@
 // Once ready, Real-Debrid gives a direct link to the file, and a converted HLS
 // version (H.264 and AAC) for files the browser cannot play.
 //
+// The source played is remembered (see historyService), and resume() plays it
+// again: the same torrent while Real-Debrid still has it, or added again
+// from its hash.
+//
 // The app polls state() while Real-Debrid prepares it:
 //   { state: 'converting' | 'downloading' | 'ready', progress, speed, seeders,
 //     url, hls, filename, size }
@@ -24,7 +28,10 @@ const TIMEOUT = 20000;
 const READY_TTL = 60 * 60 * 1000; // links handed out are reused for a while
 const VIDEO = /\.(mkv|mp4|m4v|avi|webm|mov|ts|wmv)$/i;
 
+const LIST_TTL = 60 * 1000;
+
 const RD_ERRORS = {
+  7: 'Real-Debrid no longer has this torrent. Choose a source again.',
   8: 'Real-Debrid did not accept the token saved in Settings.',
   9: 'Real-Debrid refused: the account needs premium.',
   20: 'Real-Debrid refused: the account needs premium.',
@@ -37,6 +44,7 @@ const RD_ERRORS = {
 class DebridService {
   constructor() {
     this.ready = new Map(); // torrent id + file -> { at, value }
+    this.list = null;       // { at, torrents } of the account, for marking sources
   }
 
   token() {
@@ -79,25 +87,67 @@ class DebridService {
 
   // ── Starting ─────────────────────────────────────────────────────────────
 
-  // Hands the source to Real-Debrid (or finds it there already); returns the torrent id
+  // Hands a source to Real-Debrid (or finds it there already): { torrent, hash }
   async start(sourceId, target) {
-    const release = sourcesService.release(sourceId);
-    const hash = String(release.infoHash || '').toLowerCase();
+    return this.startRelease(sourcesService.release(sourceId), target);
+  }
+
+  async startRelease(release, target) {
+    let hash = String(release.infoHash || '').toLowerCase();
 
     if (hash) {
       const reuse = await this.existing(hash, target);
-      if (reuse) return reuse;
+      if (reuse) return { torrent: reuse, hash };
     }
 
-    const added = await this.add(release, hash);
+    const torrent = await this.add(release, hash);
+    this.list = null;
     logger.info('debrid', 'Torrent sent to Real-Debrid', { title: release.title, season: target && target.season, episode: target && target.episode });
-    return added;
+
+    // Sources fetched as a .torrent file come without a hash: Real-Debrid knows it
+    if (!hash) {
+      try { hash = String((await this.request('get', `/torrents/info/${torrent}`)).hash || '').toLowerCase(); } catch (_) {}
+    }
+    return { torrent, hash };
+  }
+
+  // The source played before: the same torrent if Real-Debrid still has it,
+  // or the same one added again from its hash
+  async resume(entry, target) {
+    if (entry.torrent) {
+      try {
+        const info = await this.request('get', `/torrents/info/${entry.torrent}`);
+        const file = info.status === 'downloaded' ? this.chooseFile((info.files || []).filter(f => f.selected), target) : true;
+        if (!/error|dead|virus/.test(info.status) && file) return { torrent: entry.torrent, hash: entry.hash };
+      } catch (_) {}
+    }
+    if (!entry.hash) throw new Error('Real-Debrid no longer has this source. Choose a source again.');
+    return this.startRelease({ infoHash: entry.hash, title: entry.title }, target);
+  }
+
+  // Torrents on the account (asked again after a minute)
+  async torrents() {
+    if (this.list && Date.now() - this.list.at < LIST_TTL) return this.list.torrents;
+    const list = await this.request('get', '/torrents', { params: { limit: 500 } });
+    this.list = { at: Date.now(), torrents: Array.isArray(list) ? list : [] };
+    return this.list.torrents;
+  }
+
+  // Hashes Real-Debrid has downloaded, to mark the sources that play at once
+  async downloadedHashes() {
+    if (!settingsService.realDebridToken()) return new Set();
+    try {
+      return new Set((await this.torrents()).filter(t => t.status === 'downloaded').map(t => String(t.hash).toLowerCase()));
+    } catch (error) {
+      logger.warn('debrid', 'Could not read the Real-Debrid torrents', { error: error.message });
+      return new Set();
+    }
   }
 
   // The same torrent added before, with the file wanted (or not chosen yet)
   async existing(hash, target) {
-    const list = await this.request('get', '/torrents', { params: { limit: 100 } });
-    const same = (Array.isArray(list) ? list : []).filter(t => String(t.hash).toLowerCase() === hash && !/error|dead|virus/.test(t.status));
+    this.list = null;
+    const same = (await this.torrents()).filter(t => String(t.hash).toLowerCase() === hash && !/error|dead|virus/.test(t.status));
 
     for (const torrent of same) {
       if (torrent.status === 'magnet_conversion' || torrent.status === 'waiting_files_selection') return torrent.id;

@@ -154,4 +154,5 @@ backend/data/recordings/
 # Local settings and library index
 backend/data/settings.json
 backend/data/library.json
+backend/data/discover-history.json
 backend/data/logs/

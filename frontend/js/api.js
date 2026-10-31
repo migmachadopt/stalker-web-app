@@ -173,12 +173,25 @@ const api = {
   },
   
   // Hands a source to Real-Debrid; then ask how it is going until it is ready
-  // (request: { kind, season, episode })
+  // (request: { kind, tmdbId, season, episode })
   async discoverPlay(source, request) {
     return this.fetch('/discover/play', {
       method: 'POST',
-      body: JSON.stringify({ source, kind: request.kind, season: request.season, episode: request.episode })
+      body: JSON.stringify({ source, kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode })
     });
+  },
+  
+  // The source played last for this film or episode, again
+  async discoverContinue(request) {
+    return this.fetch('/discover/continue', {
+      method: 'POST',
+      body: JSON.stringify({ kind: request.kind, tmdbId: request.tmdbId, season: request.season, episode: request.episode })
+    });
+  },
+  
+  // Sources played for a film, or for each episode of a series
+  async discoverHistory(kind, id) {
+    return this.fetch(`/discover/history/${kind}/${id}`);
   },
   
   async discoverPlayState(torrent, request) {
