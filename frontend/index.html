@@ -1915,7 +1915,7 @@
 
         // Asks which Chromecast to use (if none is connected) and plays there.
         // Resolves to false when the viewer closes the list of devices.
-        async start({ url, title, subtitle, image, startAt }) {
+        async start({ url, contentType, title, subtitle, image, startAt }) {
           const context = cast.framework.CastContext.getInstance();
 
           if (!context.getCurrentSession()) {
@@ -1927,7 +1927,7 @@
             }
           }
 
-          const info = new chrome.cast.media.MediaInfo(url, 'video/mp4');
+          const info = new chrome.cast.media.MediaInfo(url, contentType || 'video/mp4');
           info.metadata = new chrome.cast.media.GenericMediaMetadata();
           info.metadata.title = title;
           info.metadata.subtitle = subtitle || '';
@@ -2080,8 +2080,12 @@
     //   play(job, castBase)  castBase: the server's address on the home network, if set
     //   download(job)
     //   view                 the player, to put in the page (null when closed)
+    //
+    // Also plays other videos through open(item): item.hls marks an HLS
+    // address, and item.alternate ({ label, item }) another version of the same
+    // video (used too when this one fails to play)
     function useRecordingPlayer() {
-      const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, image, casting }
+      const [playing, setPlaying] = useState(null); // { id, title, subtitle, url, castUrl, castType, hls, alternate, image, casting }
       const videoRef = useRef(null);
       const lastSaved = useRef(0);
 
@@ -2107,10 +2111,39 @@
           castUrl: castBase ? `${castBase}${new URL(url).pathname}` : url,
           image: job.metadata ? metadataText(job.metadata).poster : ''
         };
-        // Already connected to a Chromecast: it plays there straight away
-        if (castApi.device) await sendToCast(item, savedRecordingPosition(job.id));
+        await open(item);
+      };
+
+      // Already connected to a Chromecast: it plays there straight away
+      const open = async (item) => {
+        if (castApi.device) await sendToCast(item, savedRecordingPosition(item.id));
         else setPlaying(item);
       };
+
+      // The other version of the video, from where this one is
+      const switchVersion = () => {
+        if (!playing || !playing.alternate) return;
+        const video = videoRef.current;
+        resumeAt.current = video && video.currentTime > 0 ? video.currentTime : resumeAt.current;
+        setPlaying({ ...playing.alternate.item, alternate: { label: playing.alternate.back, back: playing.alternate.label, item: { ...playing, alternate: undefined } } });
+      };
+
+      // HLS through hls.js (Safari plays it by itself)
+      useEffect(() => {
+        const video = videoRef.current;
+        if (!playing || !playing.hls || playing.casting || !video) return;
+        if (video.canPlayType('application/vnd.apple.mpegurl') || typeof Hls === 'undefined' || !Hls.isSupported()) {
+          video.src = playing.url;
+          return;
+        }
+        const hls = new Hls({ enableWorker: true });
+        hls.loadSource(playing.url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.ERROR, (event, data) => {
+          if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
+        });
+        return () => hls.destroy();
+      }, [playing && playing.url, playing && playing.casting]);
 
       // While the Chromecast has the video, the one in the browser is put away
       const sendToCast = async (item, startAt) => {
@@ -2118,7 +2151,7 @@
         setPlaying({ ...item, casting: true });
         let started = false;
         try {
-          started = await castApi.start({ url: item.castUrl, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
+          started = await castApi.start({ url: item.castUrl || item.url, contentType: item.castType, title: item.title, subtitle: item.subtitle, image: item.image, startAt });
         } finally {
           if (!started) setPlaying({ ...item, casting: false });
         }
@@ -2222,13 +2255,14 @@
           {playing && !playing.casting && !castApi.loaded && (
             <div className="vod-player">
               <video
-                key={playing.url}
+                key={`video:${playing.url}`}
                 ref={videoRef}
-                src={playing.url}
+                src={playing.hls ? undefined : playing.url}
                 autoPlay
                 playsInline
                 onLoadedMetadata={handleLoadedMetadata}
                 onTimeUpdate={handleTimeUpdate}
+                onError={() => { if (playing.alternate && playing.alternate.onError) switchVersion(); }}
               />
               <PlayerControls
                 key={playing.url}
@@ -2237,6 +2271,9 @@
                 subtitle={playing.subtitle}
                 onClose={closePlayer}
               >
+                {playing.alternate && (
+                  <button className="pc-pill" title={playing.alternate.hint || ''} onClick={switchVersion}>{playing.alternate.label}</button>
+                )}
                 {castApi.available && (
                   <button className="pc-pill" title="Play on a Chromecast" onClick={castPlaying}><Icon name="cast" size={16} /> Cast</button>
                 )}
@@ -2246,7 +2283,7 @@
         </React.Fragment>
       );
 
-      return { play, download, playing, view };
+      return { play, open, download, playing, view };
     }
 
     // Position reached in each recording (seconds), kept in this browser
@@ -2767,9 +2804,75 @@
       return `${Math.floor(days / 365)}y`;
     };
 
+    // Audio most browsers cannot play
+    const BROWSER_SILENT_AUDIO = ['AC3', 'DD+', 'DTS', 'TrueHD', 'Atmos'];
+
+    // Can the browser play Real-Debrid's file as it is, or should it start with
+    // Real-Debrid's converted version?
+    function browserPlaysFile(filename, quality) {
+      const ext = (String(filename).match(/\.(\w+)$/) || [])[1] || '';
+      if (quality.codec === 'HEVC' || quality.codec === 'AV1') return false;
+      if (/^(mp4|m4v|webm)$/i.test(ext)) return true;
+      return /^mkv$/i.test(ext) && !BROWSER_SILENT_AUDIO.includes(quality.audio);
+    }
+
+    // Player item for a source Real-Debrid has ready: the file itself and the
+    // converted version, the second one offered as the other choice
+    function debridItem(request, source, ready) {
+      const base = { id: `discover:${request.key}`, title: request.title, subtitle: request.subtitle, image: request.image };
+      const original = { ...base, url: ready.url, castType: 'video/mp4' };
+      if (!ready.hls) return original;
+      const converted = { ...base, url: ready.hls, hls: true, castType: 'application/x-mpegurl' };
+
+      return browserPlaysFile(ready.filename, source.quality)
+        ? { ...original, alternate: { label: 'No sound? Compatible', back: 'Original', hint: 'Real-Debrid\'s converted version, which every browser plays', onError: true, item: converted } }
+        : { ...converted, alternate: { label: 'Original quality', back: 'Compatible', hint: 'The file itself (may play without sound in this browser)', item: original } };
+    }
+
+    const formatSpeed = (bytes) => (bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB/s` : bytes > 0 ? `${Math.round(bytes / 1e3)} KB/s` : '');
+
     // Torrents of a film or episode, from the Prowlarr set up in the admin Settings
-    function DiscoverSources({ request, onClose }) {
+    function DiscoverSources({ request, onClose, onReady }) {
       const [state, setState] = useState({ loading: true, items: [], error: '' });
+      const [preparing, setPreparing] = useState(null); // { id, state, progress, speed, error }
+      const polling = useRef(null);
+
+      const stopPolling = () => {
+        if (polling.current) polling.current.cancelled = true;
+        polling.current = null;
+      };
+      useEffect(() => stopPolling, []);
+
+      // Real-Debrid takes it (at once when it already has it, or after downloading it)
+      const play = async (item) => {
+        stopPolling();
+        const run = { cancelled: false };
+        polling.current = run;
+        setPreparing({ id: item.id, state: 'starting' });
+
+        try {
+          const started = await api.discoverPlay(item.id, request);
+          if (!started.success) throw new Error(started.error || 'Could not start this source');
+
+          while (!run.cancelled) {
+            const data = await api.discoverPlayState(started.torrent, request);
+            if (run.cancelled) return;
+            if (!data.success) throw new Error(data.error || 'Real-Debrid did not answer');
+            if (data.state === 'ready') {
+              setPreparing(null);
+              polling.current = null;
+              onReady(debridItem(request, item, data));
+              return;
+            }
+            setPreparing({ id: item.id, ...data });
+            await new Promise(resolve => setTimeout(resolve, data.state === 'downloading' ? 4000 : 2000));
+          }
+        } catch (err) {
+          if (!run.cancelled) setPreparing({ id: item.id, error: err.message });
+        }
+      };
+
+      const cancel = () => { stopPolling(); setPreparing(null); };
       const [resolution, setResolution] = useState('');
       const [portuguese, setPortuguese] = useState(false);
       const [sort, setSort] = useState('quality');
@@ -2859,9 +2962,30 @@
                       ].filter(Boolean).join(' · ')}
                     </div>
                   </div>
-                  <button className="vod-play" disabled title="Coming in the next step">
-                    <Icon name="play" size={16} /> Play
-                  </button>
+                  {preparing && preparing.id === item.id && !preparing.error ? (
+                    <div className="discover-preparing">
+                      <span className="discover-spinner"></span>
+                      <span>
+                        {preparing.state === 'downloading'
+                          ? `Downloading on Real-Debrid ${preparing.progress || 0}%${preparing.speed ? ` · ${formatSpeed(preparing.speed)}` : ''}`
+                          : preparing.state === 'converting' ? 'Reading the torrent...' : 'Sending to Real-Debrid...'}
+                      </span>
+                      <button className="vod-secondary" onClick={cancel}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button className="vod-play" onClick={() => play(item)}>
+                      <Icon name="play" size={16} /> Play
+                    </button>
+                  )}
+                  {preparing && preparing.id === item.id && preparing.state === 'downloading' && (
+                    <div className="discover-preparing-note">
+                      <div className="discover-progress"><span style={{ width: `${preparing.progress || 0}%` }}></span></div>
+                      Real-Debrid did not have this one yet. You can wait, or choose another source.
+                    </div>
+                  )}
+                  {preparing && preparing.id === item.id && preparing.error && (
+                    <div className="discover-preparing-note"><div className="error-msg">{preparing.error}</div></div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2880,6 +3004,7 @@
       const [season, setSeason] = useState(null);
       const [selectedEpisode, setSelectedEpisode] = useState(null);
       const [sources, setSources] = useState(null);  // the film or episode whose sources are open
+      const player = useRecordingPlayer();
       const [heroIndex, setHeroIndex] = useState(0);
       const [error, setError] = useState('');
       const [detailError, setDetailError] = useState('');
@@ -2966,21 +3091,32 @@
       useEffect(() => {
         const onKey = (e) => {
           if (e.key !== 'Escape' || document.fullscreenElement) return;
+          if (player.playing) return; // the player has its own close button
           if (sources) setSources(null);
           else if (detail) setDetail(null);
           else if (grid) closeGrid();
         };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
-      }, [!!detail, !!grid, !!sources]);
+      }, [!!detail, !!grid, !!sources, !!player.playing]);
 
-      const findSources = (ep) => setSources(ep
-        ? {
-            key: `tv:${detail.tmdbId}:${seasonNumber}:${ep.number}`,
-            kind: 'tv', tmdbId: detail.tmdbId, season: seasonNumber, episode: ep.number,
-            label: `${detail.name} · S${String(seasonNumber).padStart(2, '0')}E${String(ep.number).padStart(2, '0')} · ${ep.title}`
-          }
-        : { key: `movie:${detail.tmdbId}`, kind: 'movie', tmdbId: detail.tmdbId, label: [detail.name, detail.year].filter(Boolean).join(' · ') });
+      const findSources = (ep) => {
+        const code = ep && `S${String(seasonNumber).padStart(2, '0')}E${String(ep.number).padStart(2, '0')}`;
+        setSources(ep
+          ? {
+              key: `tv:${detail.tmdbId}:${seasonNumber}:${ep.number}`,
+              kind: 'tv', tmdbId: detail.tmdbId, season: seasonNumber, episode: ep.number,
+              label: `${detail.name} · ${code} · ${ep.title}`,
+              title: detail.name, subtitle: `${code} · ${ep.title}`, image: ep.still || detail.backdrop || detail.poster
+            }
+          : {
+              key: `movie:${detail.tmdbId}`, kind: 'movie', tmdbId: detail.tmdbId,
+              label: [detail.name, detail.year].filter(Boolean).join(' · '),
+              title: detail.name, subtitle: detail.year || '', image: detail.backdrop || detail.poster
+            });
+      };
+
+      const playReady = (item) => player.open(item).catch(err => alert(err.message));
 
       // The hero rotates through the trending titles
       const heroItems = rows && rows[0] ? rows[0].items.filter(item => item.backdrop).slice(0, 6) : [];
@@ -3086,6 +3222,8 @@
             </div>
           )}
 
+          {/* Put away while a source plays, and back when it closes */}
+          <div style={{ display: player.playing ? 'none' : undefined }}>
           {detail && (
             <div className="modal-overlay" onClick={() => setDetail(null)}>
               <div className="modal vod-detail" onClick={e => e.stopPropagation()}>
@@ -3174,7 +3312,10 @@
             </div>
           )}
 
-          {sources && <DiscoverSources request={sources} onClose={() => setSources(null)} />}
+          {sources && <DiscoverSources request={sources} onClose={() => setSources(null)} onReady={playReady} />}
+          </div>
+
+          {player.view}
         </div>
       );
     }

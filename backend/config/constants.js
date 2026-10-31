@@ -58,6 +58,9 @@ module.exports = {
   IMDB_SUGGEST: process.env.IMDB_SUGGEST || 'https://v3.sg.media-imdb.com/suggestion/x',
   METADATA_LANGUAGES: { pt: ['pt-PT', 'pt-BR'], en: ['en-US'] }, // app language -> TMDB languages, best first
 
+  // Discover: torrents found by Prowlarr, played through Real-Debrid
+  REAL_DEBRID_API: process.env.REAL_DEBRID_API || 'https://api.real-debrid.com/rest/1.0',
+
   // Video club & series catalogue
   VOD_CACHE_TTL: 10 * 60 * 1000, // 10 minutes
 

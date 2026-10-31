@@ -24,6 +24,9 @@
 //
 // prowlarrUrl / prowlarrKey: the Prowlarr that finds torrents for Discover
 // (see sourcesService). The key never leaves the server either.
+//
+// realDebridToken: Real-Debrid account that downloads and plays those
+// torrents (see debridService). Kept on the server too.
 
 const fs = require('fs');
 const path = require('path');
@@ -54,8 +57,8 @@ class SettingsService {
   }
 
   get() {
-    const { tmdbKey, prowlarrKey, ...shown } = this.settings;
-    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey, prowlarrKeySet: !!prowlarrKey };
+    const { tmdbKey, prowlarrKey, realDebridToken, ...shown } = this.settings;
+    return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey, prowlarrKeySet: !!prowlarrKey, realDebridTokenSet: !!realDebridToken };
   }
 
   // { live: true, recordings: true, ... }; on unless turned off, except the
@@ -83,6 +86,10 @@ class SettingsService {
 
   prowlarr() {
     return { url: this.settings.prowlarrUrl || '', key: this.settings.prowlarrKey || '' };
+  }
+
+  realDebridToken() {
+    return this.settings.realDebridToken || '';
   }
 
   // http://localhost:9696 (a path is allowed, for a Prowlarr behind a proxy)
@@ -198,6 +205,11 @@ class SettingsService {
 
     if (patch.prowlarrKey !== undefined) {
       next.prowlarrKey = String(patch.prowlarrKey || '').trim() || undefined;
+    }
+
+    if (patch.realDebridToken !== undefined) {
+      next.realDebridToken = String(patch.realDebridToken || '').trim() || undefined;
+      next.realDebridUser = patch.realDebridUser || undefined;
     }
 
     fs.mkdirSync(path.dirname(FILE), { recursive: true });

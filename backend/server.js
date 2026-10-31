@@ -19,6 +19,7 @@ const settingsService = require('./services/settingsService');
 const metadataService = require('./services/metadataService');
 const discoverService = require('./services/discoverService');
 const sourcesService = require('./services/sourcesService');
+const debridService = require('./services/debridService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -336,7 +337,7 @@ app.get('/api/admin/settings', authMiddleware, adminMiddleware, (req, res) => {
 
 app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res) => {
   try {
-    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey } = req.body;
+    const { storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken } = req.body;
     
     // A new key is tried before it is kept
     if (tmdbKey) await metadataService.checkKey(String(tmdbKey).trim());
@@ -351,12 +352,17 @@ app.put('/api/admin/settings', authMiddleware, adminMiddleware, async (req, res)
       prowlarrVersion = await sourcesService.check(url, key);
     }
     
-    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey });
+    // And the Real-Debrid token, whose account is shown in Settings
+    let realDebridUser;
+    if (realDebridToken) realDebridUser = await debridService.check(String(realDebridToken).trim());
+    
+    const settings = settingsService.update({ storageRoot, tmdbKey, castBaseUrl, modules, liveConversion, prowlarrUrl, prowlarrKey, realDebridToken, realDebridUser });
     const folders = settingsService.folders();
     
     if (storageRoot !== undefined) logger.logUserActivity('admin', 'changed the storage folder', { root: folders.root });
     if (modules !== undefined) logger.logUserActivity('admin', 'changed the parts of the app offered', settingsService.modules());
     if (tmdbKey !== undefined) logger.logUserActivity('admin', tmdbKey ? 'saved the TMDB key' : 'removed the TMDB key');
+    if (realDebridToken !== undefined) logger.logUserActivity('admin', realDebridToken ? 'saved the Real-Debrid token' : 'removed the Real-Debrid token');
     if (prowlarrUrl !== undefined || prowlarrKey !== undefined) logger.logUserActivity('admin', prowlarrVersion ? 'saved the Prowlarr connection' : 'removed the Prowlarr connection');
     
     res.json({ success: true, settings, prowlarrVersion, defaultStorageRoot: config.RECORDINGS_DIR, folders, storage: settingsService.check(folders.root), ffmpeg: recordingService.status().ffmpeg });
@@ -998,6 +1004,36 @@ app.get('/api/discover/sources', async (req, res) => {
     res.json({ success: true, sources });
   } catch (error) {
     logger.warn('sources', 'Source search failed', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+// Plays a source through Real-Debrid: start hands it over, then the app asks
+// how it is going until it is ready to play
+const debridTarget = (input) => (input.kind === 'tv'
+  ? { season: parseInt(input.season, 10), episode: parseInt(input.episode, 10) }
+  : null);
+
+app.post('/api/discover/play', async (req, res) => {
+  try {
+    const target = debridTarget(req.body);
+    if (target && !(target.season >= 0 && target.episode > 0)) throw new Error('Choose an episode first.');
+    const torrent = await debridService.start(String(req.body.source || ''), target);
+    const user = userService.findUserById(req.user.userId);
+    logger.logUserActivity(user ? user.username : req.user.userId, 'started a Discover source', { torrent });
+    res.json({ success: true, torrent });
+  } catch (error) {
+    logger.warn('debrid', 'Could not start a source', { error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/discover/play/:torrent', async (req, res) => {
+  try {
+    if (!/^[A-Z0-9]{1,40}$/i.test(req.params.torrent)) throw new Error('Unknown torrent');
+    res.json({ success: true, ...(await debridService.state(req.params.torrent, debridTarget(req.query))) });
+  } catch (error) {
+    logger.warn('debrid', 'Real-Debrid state failed', { error: error.message });
     res.status(400).json({ success: false, error: error.message });
   }
 });

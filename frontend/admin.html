@@ -345,6 +345,10 @@
       const [prowlarrBusy, setProwlarrBusy] = useState(false);
       const [prowlarrError, setProwlarrError] = useState('');
       const [prowlarrNote, setProwlarrNote] = useState('');
+      const [rdToken, setRdToken] = useState('');
+      const [rdBusy, setRdBusy] = useState(false);
+      const [rdError, setRdError] = useState('');
+      const [rdNote, setRdNote] = useState('');
       const [loading, setLoading] = useState(true);
       const [users, setUsers] = useState([]);
       const [showModal, setShowModal] = useState(false);
@@ -631,7 +635,7 @@
         { id: 'library', label: 'Library', hint: 'Recordings kept on this server and converted to MP4, and the Recorded gallery. Needs ffmpeg and disk space' },
         { id: 'vod', label: 'Video club', hint: 'Also enabled per user' },
         { id: 'series', label: 'Series', hint: 'Also enabled per user' },
-        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch, with torrent sources from Prowlarr. Needs the TMDB key and the Prowlarr connection below' }
+        { id: 'discover', label: 'Discover', hint: 'Films and series from TMDB, to find something to watch, with torrent sources from Prowlarr played through Real-Debrid. Needs the TMDB key, Prowlarr and Real-Debrid below' }
       ];
 
       const saveCastBase = async (e) => {
@@ -696,6 +700,35 @@
         } finally {
           setProwlarrBusy(false);
         }
+      };
+
+      // An empty token removes the one saved
+      const saveRdToken = async (token) => {
+        setRdBusy(true);
+        setRdError('');
+        setRdNote('');
+        try {
+          const data = await api.fetch('/admin/settings', {
+            method: 'PUT',
+            body: JSON.stringify({ realDebridToken: token })
+          });
+          if (!data.success) throw new Error(data.error);
+          setSettings(data);
+          setRdToken('');
+          setRdNote(token ? 'Token accepted by Real-Debrid and saved.' : 'Token removed.');
+        } catch (err) {
+          setRdError(err.message);
+        } finally {
+          setRdBusy(false);
+        }
+      };
+
+      const rdAccount = (user) => {
+        if (!user) return 'A Real-Debrid token is saved.';
+        const until = user.expiration ? new Date(user.expiration).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : '';
+        return user.premium
+          ? `Real-Debrid account ${user.username}, premium${until ? ` until ${until}` : ''}.`
+          : `Real-Debrid account ${user.username} is not premium: sources will not play.`;
       };
 
       const openView = (next) => (e) => {
@@ -962,6 +995,49 @@
                   {settings?.settings?.prowlarrUrl && (
                     <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={prowlarrBusy} onClick={() => confirm('Remove the Prowlarr connection?') && saveProwlarr('', '')}>
                       Remove
+                    </button>
+                  )}
+                </form>
+              </div>
+
+              <div className="table-container settings-panel">
+                <div className="table-header">
+                  <h3>⚡ Playing Discover sources (Real-Debrid)</h3>
+                </div>
+                <form onSubmit={(e) => { e.preventDefault(); if (rdToken.trim()) saveRdToken(rdToken.trim()); }} className="settings-body">
+                  <div className="form-group">
+                    <label>Real-Debrid API token</label>
+                    <input
+                      type="password"
+                      value={rdToken}
+                      onChange={e => setRdToken(e.target.value)}
+                      placeholder={settings?.settings?.realDebridTokenSet ? 'Saved. Type a new one to replace it' : 'From real-debrid.com/apitoken'}
+                      autoComplete="off"
+                      spellCheck="false"
+                    />
+                    <small>
+                      A source chosen in Discover is handed to Real-Debrid, which downloads it on its servers (at once, when it
+                      already has it) and gives a link to play it. Get the token at{' '}
+                      <a href="https://real-debrid.com/apitoken" target="_blank" rel="noopener noreferrer">real-debrid.com/apitoken</a>.
+                      It stays on this server.
+                    </small>
+                  </div>
+
+                  {settings && (
+                    <div className={`settings-status ${settings.settings.realDebridTokenSet && (!settings.settings.realDebridUser || settings.settings.realDebridUser.premium) ? 'ok' : 'bad'}`}>
+                      {settings.settings.realDebridTokenSet ? rdAccount(settings.settings.realDebridUser) : 'No Real-Debrid token saved.'}
+                    </div>
+                  )}
+
+                  {rdError && <div className="error-msg">{rdError}</div>}
+                  {rdNote && <div className="success-msg">{rdNote}</div>}
+
+                  <button type="submit" className="btn btn-primary" disabled={rdBusy || !rdToken.trim()}>
+                    {rdBusy ? 'Checking...' : 'Save token'}
+                  </button>
+                  {settings?.settings?.realDebridTokenSet && (
+                    <button type="button" className="btn btn-secondary" style={{ marginLeft: 8 }} disabled={rdBusy} onClick={() => confirm('Remove the Real-Debrid token?') && saveRdToken('')}>
+                      Remove token
                     </button>
                   )}
                 </form>

@@ -172,6 +172,20 @@ const api = {
     return this.fetch(`/discover/sources?kind=${kind}&id=${id}${episodePart}`);
   },
   
+  // Hands a source to Real-Debrid; then ask how it is going until it is ready
+  // (request: { kind, season, episode })
+  async discoverPlay(source, request) {
+    return this.fetch('/discover/play', {
+      method: 'POST',
+      body: JSON.stringify({ source, kind: request.kind, season: request.season, episode: request.episode })
+    });
+  },
+  
+  async discoverPlayState(torrent, request) {
+    const episodePart = request.kind === 'tv' ? `&season=${request.season}&episode=${request.episode}` : '';
+    return this.fetch(`/discover/play/${torrent}?kind=${request.kind}${episodePart}`);
+  },
+  
   // Film or episode a recording is, from its IMDb or TMDB link
   async recordingLink(id, link) {
     return this.fetch(`/recordings/${id}/metadata`, { method: 'PUT', body: JSON.stringify({ link }) });
