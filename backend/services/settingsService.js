@@ -36,7 +36,10 @@ const FILE = path.join(config.DATA_DIR, 'settings.json');
 //   library     recordings kept on this server and converted to MP4, and the
 //               Recorded gallery (needs ffmpeg and disk space)
 //   vod/series  video club and series (still enabled per user too)
-const MODULES = ['live', 'recordings', 'library', 'vod', 'series'];
+//   discover    films and series from TMDB, to find something to watch (off
+//               unless turned on)
+const MODULES = ['live', 'recordings', 'library', 'vod', 'series', 'discover'];
+const OFF_UNLESS_TURNED_ON = ['discover'];
 
 class SettingsService {
   constructor() {
@@ -52,10 +55,14 @@ class SettingsService {
     return { ...shown, modules: this.modules(), tmdbKeySet: !!tmdbKey };
   }
 
-  // { live: true, recordings: true, ... }; everything is on unless turned off
+  // { live: true, recordings: true, ... }; on unless turned off, except the
+  // newest parts, which wait to be turned on
   modules() {
     const saved = this.settings.modules || {};
-    return Object.fromEntries(MODULES.map(name => [name, saved[name] !== false]));
+    return Object.fromEntries(MODULES.map(name => [
+      name,
+      OFF_UNLESS_TURNED_ON.includes(name) ? saved[name] === true : saved[name] !== false
+    ]));
   }
 
   hasModule(name) {
@@ -152,7 +159,11 @@ class SettingsService {
     }
 
     if (patch.modules !== undefined) {
-      const modules = Object.fromEntries(MODULES.map(name => [name, patch.modules[name] !== false]));
+      const current = this.modules();
+      const modules = Object.fromEntries(MODULES.map(name => [
+        name,
+        typeof patch.modules[name] === 'boolean' ? patch.modules[name] : current[name]
+      ]));
       if (!Object.values(modules).some(Boolean)) throw new Error('Keep at least one part of the app turned on');
       next.modules = modules;
     }

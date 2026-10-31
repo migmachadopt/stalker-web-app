@@ -17,6 +17,7 @@ const subtitleService = require('./services/subtitleService');
 const recordingService = require('./services/recordingService');
 const settingsService = require('./services/settingsService');
 const metadataService = require('./services/metadataService');
+const discoverService = require('./services/discoverService');
 require('./services/guideSyncService'); // keeps the programme guide stored ahead of time
 const { authMiddleware, adminMiddleware } = require('./middleware/auth');
 const { rateLimitMiddleware, recordLoginAttempt } = require('./middleware/rateLimit');
@@ -935,6 +936,43 @@ app.post('/api/iptv/disconnect', authMiddleware, async (req, res) => {
     res.status(500).json({ success: false, error: 'Disconnect failed' });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🧭 DISCOVER - films and series from TMDB
+// ═══════════════════════════════════════════════════════════════════════════════
+
+app.use('/api/discover', authMiddleware, requireModule('discover'));
+
+const discoverLang = (req) => (req.query.lang === 'pt' ? 'pt' : 'en');
+const discoverPage = (req) => Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), 500);
+
+const discoverRoute = (handler) => async (req, res) => {
+  try {
+    res.json({ success: true, ...(await handler(req)) });
+  } catch (error) {
+    logger.warn('discover', 'TMDB request failed', { path: req.path, error: error.message });
+    res.status(400).json({ success: false, error: error.message });
+  }
+};
+
+app.get('/api/discover/home', discoverRoute(async (req) => ({ rows: await discoverService.home(discoverLang(req)) })));
+
+app.get('/api/discover/list/:id', discoverRoute(async (req) => discoverService.row(req.params.id, discoverPage(req), discoverLang(req))));
+
+app.get('/api/discover/search', discoverRoute(async (req) => {
+  const query = String(req.query.q || '').trim().slice(0, 100);
+  if (!query) throw new Error('Type something to search for');
+  const kind = ['movie', 'tv'].includes(req.query.kind) ? req.query.kind : null;
+  return discoverService.search(query, discoverPage(req), discoverLang(req), kind);
+}));
+
+app.get('/api/discover/movie/:id', discoverRoute(async (req) => ({ title: await discoverService.movie(parseInt(req.params.id, 10), discoverLang(req)) })));
+
+app.get('/api/discover/tv/:id', discoverRoute(async (req) => ({ title: await discoverService.series(parseInt(req.params.id, 10), discoverLang(req)) })));
+
+app.get('/api/discover/tv/:id/season/:number', discoverRoute(async (req) => ({
+  season: await discoverService.season(parseInt(req.params.id, 10), parseInt(req.params.number, 10), discoverLang(req))
+})));
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // 📼 LIBRARY - recordings saved on the server, trimmed and converted to MP4

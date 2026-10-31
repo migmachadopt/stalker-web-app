@@ -102,6 +102,7 @@
       trash: <React.Fragment><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" /></React.Fragment>,
       menu: <React.Fragment><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="18" x2="21" y2="18" /></React.Fragment>,
       down: <polyline points="6 9 12 15 18 9" />,
+      compass: <React.Fragment><circle cx="12" cy="12" r="10" /><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" /></React.Fragment>,
       grid: <React.Fragment><rect x="3" y="3" width="7" height="7" rx="1.5" /><rect x="14" y="3" width="7" height="7" rx="1.5" /><rect x="3" y="14" width="7" height="7" rx="1.5" /><rect x="14" y="14" width="7" height="7" rx="1.5" /></React.Fragment>,
       cast: <React.Fragment><path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" /><line x1="2" y1="20" x2="2.01" y2="20" /></React.Fragment>,
       link: <React.Fragment><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" /></React.Fragment>,
@@ -2747,7 +2748,311 @@
       );
     }
 
-    const ALL_MODULES = { live: true, recordings: true, library: true, vod: true, series: true };
+    // ═══════════════════════════════════════════════════════════════════════
+    // DISCOVER (films and series from TMDB)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // TMDB entries in the shape the video club cards use
+    const discoverCard = (entry) => ({ ...entry, id: `${entry.kind}:${entry.id}`, tmdbId: entry.id, name: entry.title });
+
+    function DiscoverBrowser() {
+      const [rows, setRows] = useState(null);        // opening page
+      const [grid, setGrid] = useState(null);        // { title, row?, query?, kind?, items, page, totalPages, total, loading }
+      const [searchTerm, setSearchTerm] = useState('');
+      const [searchKind, setSearchKind] = useState('');
+      const [detail, setDetail] = useState(null);    // the film or series open
+      const [seasonNumber, setSeasonNumber] = useState(null);
+      const [season, setSeason] = useState(null);
+      const [selectedEpisode, setSelectedEpisode] = useState(null);
+      const [heroIndex, setHeroIndex] = useState(0);
+      const [error, setError] = useState('');
+      const [detailError, setDetailError] = useState('');
+
+      useEffect(() => {
+        api.discoverHome(APP_LANGUAGE)
+          .then(data => {
+            if (!data.success) throw new Error(data.error || 'Could not load Discover');
+            setRows(data.rows.map(row => ({ ...row, items: row.items.map(discoverCard) })));
+          })
+          .catch(err => setError(err.message));
+      }, []);
+
+      // A grid: a whole row, or the results of a search; more pages on demand
+      const loadGrid = async (base, page) => {
+        setGrid(current => ({ ...base, items: page === 1 ? [] : (current ? current.items : []), loading: true }));
+        try {
+          const data = base.query
+            ? await api.discoverSearch(base.query, page, APP_LANGUAGE, base.kind)
+            : await api.discoverList(base.row, page, APP_LANGUAGE);
+          if (!data.success) throw new Error(data.error || 'Could not load the titles');
+          setGrid(current => ({
+            ...base,
+            items: [...(page === 1 ? [] : current.items), ...data.items.map(discoverCard)],
+            page: data.page,
+            totalPages: data.totalPages,
+            total: data.total,
+            loading: false
+          }));
+        } catch (err) {
+          setGrid(current => ({ ...base, items: current ? current.items : [], loading: false, error: err.message }));
+        }
+      };
+
+      // Searching starts a moment after typing stops
+      useEffect(() => {
+        const query = searchTerm.trim();
+        if (!query) {
+          setGrid(current => (current && current.query ? null : current));
+          return;
+        }
+        const timer = setTimeout(() => loadGrid({ title: `Results for "${query}"`, query, kind: searchKind }, 1), 450);
+        return () => clearTimeout(timer);
+      }, [searchTerm, searchKind]);
+
+      const closeGrid = () => { setGrid(null); setSearchTerm(''); };
+
+      const openDetail = async (card) => {
+        setDetail({ ...card, loading: true });
+        setDetailError('');
+        setSeason(null);
+        setSeasonNumber(null);
+        setSelectedEpisode(null);
+        try {
+          const data = await api.discoverTitle(card.kind, card.tmdbId, APP_LANGUAGE);
+          if (!data.success) throw new Error(data.error || 'Could not load this title');
+          setDetail({ ...data.title, tmdbId: data.title.id, name: data.title.title });
+          if (data.title.kind === 'tv' && data.title.seasons.length) {
+            // The first real season (specials, season 0, go last)
+            setSeasonNumber(data.title.seasons[0].number);
+          }
+        } catch (err) {
+          setDetailError(err.message);
+          setDetail(current => current && { ...current, loading: false });
+        }
+      };
+
+      // Episodes of the season chosen
+      useEffect(() => {
+        if (!detail || detail.kind !== 'tv' || seasonNumber === null) return;
+        let cancelled = false;
+        setSeason(null);
+        api.discoverSeason(detail.tmdbId, seasonNumber, APP_LANGUAGE)
+          .then(data => {
+            if (cancelled) return;
+            if (!data.success) throw new Error(data.error || 'Could not load the episodes');
+            setSeason(data.season);
+          })
+          .catch(err => !cancelled && setDetailError(err.message));
+        return () => { cancelled = true; };
+      }, [detail && detail.tmdbId, seasonNumber]);
+
+      // Escape closes the innermost layer
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.key !== 'Escape' || document.fullscreenElement) return;
+          if (detail) setDetail(null);
+          else if (grid) closeGrid();
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+      }, [!!detail, !!grid]);
+
+      // The hero rotates through the trending titles
+      const heroItems = rows && rows[0] ? rows[0].items.filter(item => item.backdrop).slice(0, 6) : [];
+      const hero = heroItems[heroIndex % Math.max(heroItems.length, 1)];
+      useEffect(() => {
+        if (heroItems.length < 2 || grid || detail) return;
+        const timer = setInterval(() => setHeroIndex(i => (i + 1) % heroItems.length), 9000);
+        return () => clearInterval(timer);
+      }, [heroItems.length, !!grid, !!detail]);
+
+      const meta = (item) => [
+        item.year,
+        item.runtime ? `${Math.floor(item.runtime / 60)}h ${String(item.runtime % 60).padStart(2, '0')}m` : '',
+        item.rating ? `★ ${item.rating}` : '',
+        item.kind === 'tv' ? 'Series' : 'Film'
+      ].filter(Boolean);
+
+      const episodeDate = (date) => date
+        ? new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+        : '';
+
+      return (
+        <div className="vod-browser">
+          <div className={`vod-topbar ${grid ? 'solid' : ''}`}>
+            {grid && <button className="vod-back" onClick={closeGrid} title="Back"><Icon name="back" /></button>}
+            <h2>{grid ? grid.title : 'Discover'}</h2>
+            <div className="search-container vod-search">
+              <span className="search-icon"><Icon name="search" size={16} /></span>
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Search films and series..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
+            </div>
+            {grid && grid.query && (
+              <div className="discover-kinds">
+                {[['', 'All'], ['movie', 'Films'], ['tv', 'Series']].map(([kind, label]) => (
+                  <button key={kind} className={`theme-option ${searchKind === kind ? 'active' : ''}`} onClick={() => setSearchKind(kind)}>{label}</button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {grid ? (
+            <div className="vod-scroll with-topbar">
+              {grid.total > 0 && <div className="vod-grid-count">{grid.total} titles</div>}
+              <div className="vod-grid">
+                {grid.items.map(item => <VodCard key={item.id} item={item} onOpen={openDetail} />)}
+                {grid.loading && Array.from({ length: 7 }, (_, i) => <div key={`s${i}`} className="vod-card skeleton"></div>)}
+              </div>
+              {grid.error && <div className="vod-message"><div className="error-msg">{grid.error}</div></div>}
+              {!grid.loading && grid.items.length === 0 && !grid.error && <div className="vod-message">No titles found.</div>}
+              {!grid.loading && grid.page < grid.totalPages && (
+                <div className="vod-more">
+                  <button className="btn btn-secondary" onClick={() => loadGrid(grid, grid.page + 1)}>Load more</button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="vod-scroll">
+              {hero ? (
+                <div className="vod-hero">
+                  {heroItems.map(item => (
+                    <div
+                      key={item.id}
+                      className={`vod-hero-backdrop ${item.id === hero.id ? 'active' : ''}`}
+                      style={{ backgroundImage: `url("${item.backdrop}")` }}
+                    ></div>
+                  ))}
+                  <div className="vod-hero-text">
+                    <h1>{hero.name}</h1>
+                    <div className="vod-hero-genres">{meta(hero).join('  •  ')}</div>
+                    <p>{hero.overview}</p>
+                    <div className="vod-actions">
+                      <button className="vod-play" onClick={() => openDetail(hero)}>View Details</button>
+                    </div>
+                  </div>
+                  {heroItems.length > 1 && (
+                    <div className="vod-hero-dots">
+                      {heroItems.map((item, i) => (
+                        <button key={item.id} className={item.id === hero.id ? 'active' : ''} title={item.name} onClick={() => setHeroIndex(i)}></button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                !error && <div className="vod-hero placeholder"></div>
+              )}
+
+              {error && <div className="vod-message"><div className="error-msg">{error}</div></div>}
+
+              {(rows || Array.from({ length: 3 }, (_, i) => ({ id: `s${i}`, title: '' }))).map(row => (
+                <VodRow
+                  key={row.id}
+                  title={row.title}
+                  row={row.items ? { items: row.items } : null}
+                  onOpen={openDetail}
+                  onSeeAll={() => loadGrid({ title: row.title, row: row.id }, 1)}
+                />
+              ))}
+            </div>
+          )}
+
+          {detail && (
+            <div className="modal-overlay" onClick={() => setDetail(null)}>
+              <div className="modal vod-detail" onClick={e => e.stopPropagation()}>
+                {detail.backdrop && <div className="vod-detail-backdrop" style={{ backgroundImage: `url("${detail.backdrop}")` }}></div>}
+                <button className="vod-close" onClick={() => setDetail(null)} title="Close"><Icon name="x" size={18} /></button>
+                <div className="vod-detail-top">
+                  <img src={detail.poster || POSTER_FALLBACK} alt=""
+                    onError={(e) => { e.target.onerror = null; e.target.src = POSTER_FALLBACK; }} />
+                  <div className="vod-detail-text">
+                    <h2>{detail.name}</h2>
+                    <div className="vod-meta">{meta(detail).map(m => <span key={m}>{m}</span>)}</div>
+                    {detail.genres && detail.genres.length > 0 && <div className="vod-genres">{detail.genres.slice(0, 3).join(' • ')}</div>}
+                    {detail.loading ? <p>Loading...</p> : <p>{detail.overview}</p>}
+                    {detail.director && <div className="vod-credits"><strong>Director</strong> {detail.director}</div>}
+                    {detail.cast && detail.cast.length > 0 && <div className="vod-credits"><strong>Cast</strong> {detail.cast.join(', ')}</div>}
+
+                    {detail.kind === 'movie' && !detail.loading && !detailError && (
+                      <div className="vod-actions">
+                        <button className="vod-play" disabled title="Coming in the next step">
+                          <Icon name="search" size={16} /> Find sources
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {detailError && <div className="error-msg">{detailError}</div>}
+
+                {detail.kind === 'tv' && detail.seasons && (
+                  <div className="vod-episodes">
+                    {detail.seasons.length === 0 && <div className="vod-message">No episodes listed.</div>}
+                    {detail.seasons.length > 1 && (
+                      <div className="vod-seasons">
+                        {detail.seasons.map(s => (
+                          <button
+                            key={s.number}
+                            className={`theme-option ${s.number === seasonNumber ? 'active' : ''}`}
+                            onClick={() => { setSeasonNumber(s.number); setSelectedEpisode(null); }}
+                          >
+                            {s.number === 0 ? 'Specials' : `Season ${s.number}`}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {seasonNumber !== null && !season && !detailError && <div className="vod-message">Loading episodes...</div>}
+                    {season && (
+                      <div className="rec-episodes">
+                        {season.episodes.map(ep => {
+                          const chosen = selectedEpisode === ep.number;
+                          return (
+                            <div
+                              key={ep.number}
+                              className={`rec-episode ${chosen ? 'chosen' : ''}`}
+                              onClick={() => setSelectedEpisode(chosen ? null : ep.number)}
+                            >
+                              <div className="rec-episode-thumb">
+                                {ep.still
+                                  ? <img src={ep.still} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
+                                  : <Icon name="film" size={24} />}
+                              </div>
+                              <div className="rec-episode-text">
+                                <div className="rec-episode-title">
+                                  <span className="rec-episode-number">E{String(ep.number).padStart(2, '0')}</span>
+                                  {ep.title}
+                                </div>
+                                <div className="rec-episode-sub">
+                                  {[episodeDate(ep.date), ep.runtime ? `${ep.runtime} min` : '', ep.rating ? `★ ${ep.rating}` : ''].filter(Boolean).join(' · ')}
+                                </div>
+                                {ep.overview && <div className="rec-episode-overview">{ep.overview}</div>}
+                                {chosen && (
+                                  <div className="vod-actions discover-episode-actions">
+                                    <button className="vod-play" disabled title="Coming in the next step">
+                                      <Icon name="search" size={16} /> Find sources
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const ALL_MODULES = { live: true, recordings: true, library: true, vod: true, series: true, discover: false };
 
     // First section to open: the first one this server offers and the user can see
     function firstSection(user) {
@@ -2757,6 +3062,7 @@
       if (modules.recordings) return 'guide';
       if (sections.vod) return 'vod';
       if (sections.series) return 'series';
+      if (modules.discover) return 'discover';
       return 'recorded';
     }
 
@@ -2783,7 +3089,7 @@
 
       // UI state
       const [screen, setScreen] = useState('login');
-      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded'
+      const [section, setSection] = useState('tv'); // 'tv' | 'guide' | 'library' | 'vod' | 'series' | 'recorded' | 'discover'
       const [guideOpened, setGuideOpened] = useState(false); // keeps the guide mounted once visited
       const [error, setError] = useState('');
       const [success, setSuccess] = useState('');
@@ -3931,6 +4237,9 @@
             {modules.library && (
               <div className={`nav-item ${section === 'recorded' ? 'active' : ''}`} title="Recorded" onClick={() => switchSection('recorded')}><Icon name="grid" /></div>
             )}
+            {modules.discover && (
+              <div className={`nav-item ${section === 'discover' ? 'active' : ''}`} title="Discover" onClick={() => switchSection('discover')}><Icon name="compass" /></div>
+            )}
             <div className="nav-spacer"></div>
             <div className="nav-item" title="Preferences" onClick={() => setShowPreferences(true)}><Icon name="droplet" /></div>
             <div className="nav-item" title="Change Password" onClick={() => setShowChangePassword(true)}><Icon name="lock" /></div>
@@ -3945,6 +4254,8 @@
           {section === 'library' && <LibraryBrowser />}
 
           {section === 'recorded' && <RecordedBrowser />}
+
+          {section === 'discover' && <DiscoverBrowser />}
 
           {guideOpened && (
             <div className="section-host" style={{ display: section === 'guide' ? 'flex' : 'none' }}>

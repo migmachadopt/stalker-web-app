@@ -145,6 +145,27 @@ const api = {
     return this.fetch(`/recordings/${id}`, { method: 'DELETE' });
   },
   
+  // Discover: films and series from TMDB (lang: 'en' or 'pt')
+  async discoverHome(lang) {
+    return this.fetch(`/discover/home?lang=${lang}`);
+  },
+  
+  async discoverList(id, page, lang) {
+    return this.fetch(`/discover/list/${id}?page=${page}&lang=${lang}`);
+  },
+  
+  async discoverSearch(query, page, lang, kind = '') {
+    return this.fetch(`/discover/search?q=${encodeURIComponent(query)}&page=${page}&lang=${lang}${kind ? `&kind=${kind}` : ''}`);
+  },
+  
+  async discoverTitle(kind, id, lang) {
+    return this.fetch(`/discover/${kind === 'tv' ? 'tv' : 'movie'}/${id}?lang=${lang}`);
+  },
+  
+  async discoverSeason(id, number, lang) {
+    return this.fetch(`/discover/tv/${id}/season/${number}?lang=${lang}`);
+  },
+  
   // Film or episode a recording is, from its IMDb or TMDB link
   async recordingLink(id, link) {
     return this.fetch(`/recordings/${id}/metadata`, { method: 'PUT', body: JSON.stringify({ link }) });

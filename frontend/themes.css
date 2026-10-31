@@ -4503,6 +4503,27 @@ video::cue {
   .rec-episode-overview { display: none; }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   DISCOVER (films and series from TMDB)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.discover-kinds {
+  display: flex;
+  gap: 6px;
+}
+
+.rec-episode.chosen {
+  background: var(--surface-hover);
+}
+
+.discover-episode-actions {
+  margin-top: 10px;
+}
+
+.rec-episode-thumb .icon {
+  color: var(--text-tertiary);
+}
+
 /* Playing on a Chromecast: the remote control shown in place of the video */
 .vod-player.cast-remote {
   display: flex;
