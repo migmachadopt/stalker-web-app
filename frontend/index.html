@@ -32,7 +32,7 @@
   <div id="root"></div>
   
   <script type="text/babel">
-    const { useState, useEffect, useRef, useMemo } = React;
+    const { useState, useEffect, useLayoutEffect, useRef, useMemo } = React;
     
     // Backend origin used for stream proxy (API_URL comes from api.js)
     const BACKEND_ORIGIN = new URL(API_URL, window.location.href).origin;
@@ -340,6 +340,8 @@
       window.__tvFocusFirst = () => enter(layer());
 
       window.__tvBack = () => {
+        // (the TV home's own steps back first, see TvHome)
+        if (window.__tvBackFirst && !layer().matches('.modal-overlay, .vod-player') && window.__tvBackFirst()) return true;
         const el = document.activeElement;
         if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) { el.blur(); return true; }
         settle();
@@ -4161,9 +4163,9 @@
       );
     }
 
-    // onSection(id) opens a part of the app; onIntent({ section, ... }) opens a
-    // title there; onPlayChannel(channel) starts a channel
-    function HomeDashboard({ user, modules, channels, onSection, onPlayChannel, onIntent }) {
+    // What the home page shows (also the TV app's home, TvHome): onIntent({
+    // section, ... }) opens a title in its part of the app
+    function useHomeData({ user, modules, channels, onIntent }) {
       const [home, setHome] = useState(null);             // { recentChannels, discover }
       const [recordings, setRecordings] = useState(null); // { recordings, castBase }
       const [trending, setTrending] = useState([]);
@@ -4285,7 +4287,7 @@
           logo: job.channelLogo,
           progress: job.outputDuration ? at / job.outputDuration : null,
           note: job.outputDuration ? `${Math.max(1, Math.round((job.outputDuration - at) / 60))} min left` : '',
-          open: () => player.play(job, recordings.castBase).catch(err => alert(err.message))
+          open: () => playRecording(job)
         });
       });
       watching.sort((a, b) => b.at - a.at);
@@ -4306,6 +4308,22 @@
         if (favorite.type === 'discover') onIntent({ section: 'discover', open: favorite.data });
         else if (favorite.data && favorite.data.item) onIntent({ section: favorite.type, open: favorite.data.item });
       };
+
+      const playRecording = (job) => player.play(job, recordings.castBase).catch(err => alert(err.message));
+
+      return {
+        clock, player, continuing, watching, favoriteChannels, favoriteTitles, recentChannels, onAir,
+        latest, trending, tiles, openFavorite, heading, recordingImage, playRecording
+      };
+    }
+
+    // onSection(id) opens a part of the app; onIntent({ section, ... }) opens a
+    // title there; onPlayChannel(channel) starts a channel
+    function HomeDashboard({ user, modules, channels, onSection, onPlayChannel, onIntent }) {
+      const {
+        clock, player, continuing, watching, favoriteChannels, favoriteTitles, recentChannels, onAir,
+        latest, trending, tiles, openFavorite, heading, recordingImage, playRecording
+      } = useHomeData({ user, modules, channels, onIntent });
 
       const name = user && user.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : '';
 
@@ -4392,7 +4410,7 @@
                   const { title, subtitle } = heading(job);
                   const image = recordingImage(job);
                   return (
-                    <div key={job.id} className="home-card" onClick={() => player.play(job, recordings.castBase).catch(err => alert(err.message))} title={title}>
+                    <div key={job.id} className="home-card" onClick={() => playRecording(job)} title={title}>
                       <div className="home-card-image">
                         {image
                           ? <img src={image} alt="" loading="lazy" onError={(e) => { e.target.style.display = 'none'; }} />
@@ -4422,6 +4440,309 @@
           </div>
 
           {player.view}
+        </div>
+      );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TV APP HOME: rows of cards moved by the remote, the focused one shown large
+    // ═══════════════════════════════════════════════════════════════════════
+    //
+    // The home of the Android TV app, made for a remote rather than a mouse:
+    // the arrows move along the rows (each one remembers where it was left), the
+    // row being used slides up into place and the card in focus is shown large
+    // at the top. Left from the first card opens the menu (TvMenu).
+
+    const clockTime = (seconds) => new Date(seconds * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+
+    function TvHome({ user, modules, channels, onPlayChannel, onIntent }) {
+      const {
+        clock, player, continuing, watching, favoriteChannels, favoriteTitles, recentChannels, onAir,
+        latest, trending, openFavorite, heading, recordingImage, playRecording
+      } = useHomeData({ user, modules, channels, onIntent });
+
+      const [at, setAt] = useState({ row: 0, col: 0 });
+      const remembered = useRef({});   // the card each row was left on, by row id
+      const pressed = useRef(false);   // a key used here (until then the first card takes the focus)
+      const rootRef = useRef(null);
+      const railsRef = useRef(null);
+      const [shift, setShift] = useState({ y: 0, x: {} });
+
+      const channelCard = (channel) => {
+        const programme = onAir[String(channel.id)];
+        const now = Date.now() / 1000;
+        return {
+          key: `c${channel.id}`,
+          title: channel.name.replace(/\s*MOBILE\s*$/i, ''),
+          subtitle: programme ? programme.name : `Channel ${channel.number}`,
+          logo: channel.logo || CHANNEL_LOGO_FALLBACK,
+          programme,
+          progress: programme ? Math.min(1, Math.max(0, (now - programme.start) / (programme.stop - programme.start))) : null,
+          overview: programme && programme.descr,
+          open: () => onPlayChannel(channel)
+        };
+      };
+
+      const rows = [
+        { id: 'continue', title: 'Continue watching', kind: 'wide', items: watching.slice(0, 20).map(item => ({
+          ...item,
+          status: continuing && item.discover && continuing.key === item.discover ? (continuing.error || debridStatus(continuing)) : '',
+          open: () => !(continuing && item.discover && continuing.key === item.discover && !continuing.error) && item.open()
+        })) },
+        { id: 'channels', title: 'Favourite channels', kind: 'channel', items: favoriteChannels.map(channelCard) },
+        { id: 'titles', title: 'Favourites', kind: 'poster', items: favoriteTitles.map(favorite => ({
+          key: favorite.key,
+          title: favorite.name,
+          subtitle: favorite.type === 'vod' ? 'Video club' : favorite.type === 'series' ? 'Series' : favorite.data && favorite.data.kind === 'tv' ? 'Series · Discover' : 'Film · Discover',
+          image: largePoster(favorite.image) || POSTER_FALLBACK,
+          backdrop: favorite.data && favorite.data.backdrop,
+          open: () => openFavorite(favorite)
+        })) },
+        { id: 'recent', title: 'Last channels watched', kind: 'channel', items: modules.live ? recentChannels.map(channelCard) : [] },
+        { id: 'recorded', title: 'Recently recorded', kind: 'wide', items: latest.map(job => {
+          const { title, subtitle } = heading(job);
+          return {
+            key: `r${job.id}`, title, logo: recordingImage(job) ? '' : (job.channelLogo || CHANNEL_LOGO_FALLBACK),
+            subtitle: [subtitle, job.outputDuration ? `${Math.round(job.outputDuration / 60)} min` : ''].filter(Boolean).join(' · '),
+            image: recordingImage(job),
+            overview: job.metadata ? metadataText(job.metadata).overview : '',
+            open: () => playRecording(job)
+          };
+        }) },
+        { id: 'trending', title: 'Trending this week', kind: 'poster', items: trending.map(item => ({
+          key: item.id,
+          title: item.name,
+          subtitle: [item.year, item.kind === 'tv' ? 'Series' : 'Film'].filter(Boolean).join(' · '),
+          image: item.poster || POSTER_FALLBACK,
+          backdrop: item.backdrop,
+          overview: item.overview,
+          open: () => onIntent({ section: 'discover', open: item })
+        })) }
+      ].filter(row => row.items.length > 0);
+
+      // (rows come and go as they load: the place stays in range)
+      const row = Math.min(at.row, Math.max(0, rows.length - 1));
+      const col = rows[row] ? Math.min(at.col, rows[row].items.length - 1) : 0;
+      const focused = rows[row] ? rows[row].items[col] : null;
+      const atRef = useRef(at);
+      atRef.current = { row, col };
+
+      const cardAt = (r, c) => rootRef.current && rootRef.current.querySelector(`[data-tv-card="${r}:${c}"]`);
+
+      // The row in use slides to the top of the rows, and its focused card to the left
+      useLayoutEffect(() => {
+        const rails = railsRef.current;
+        if (!rails) return;
+        const rail = rails.children[row];
+        const card = cardAt(row, col);
+        const first = card && card.parentElement.firstElementChild;
+        setShift(current => ({
+          y: rail ? rail.offsetTop : 0,
+          x: { ...current.x, [rows[row] ? rows[row].id : '']: card ? card.offsetLeft - first.offsetLeft : 0 }
+        }));
+      }, [row, col, rows.length]);
+
+      // The card under the focus is the one focused in the page (the app gives
+      // the focus back to it after a video, and the menu leaves to it)
+      useEffect(() => {
+        const card = cardAt(row, col);
+        const el = document.activeElement;
+        const elsewhere = el && el !== document.body && !rootRef.current.contains(el) && pressed.current;
+        if (card && !elsewhere && el !== card) card.focus({ preventScroll: true });
+      }, [row, col, rows.length]);
+
+      const go = (r, c) => {
+        if (rows[row]) remembered.current[rows[row].id] = col;
+        setAt({ row: r, col: c });
+      };
+
+      const toRow = (r) => {
+        const target = rows[r];
+        go(r, Math.min(remembered.current[target.id] || 0, target.items.length - 1));
+      };
+
+      const openMenu = () => {
+        const item = document.querySelector('.tv-menu .nav-item.active') || document.querySelector('.tv-menu .nav-item');
+        if (item) item.focus({ preventScroll: true });
+      };
+
+      // The remote, before the page's own focus moving (see "Remote control")
+      const keys = useRef(null);
+      keys.current = (e) => {
+        if (document.querySelector('.modal-overlay, .vod-player')) return;
+        pressed.current = true;
+        const el = document.activeElement;
+        const inMenu = el && el.closest && el.closest('.tv-menu');
+        if (inMenu) {
+          if (e.key === 'ArrowRight' && rows.length) {
+            e.preventDefault();
+            e.stopPropagation();
+            const card = cardAt(row, col);
+            if (card) card.focus({ preventScroll: true });
+          }
+          return;
+        }
+        if (!rows.length) {
+          if (e.key.startsWith('Arrow')) { e.preventDefault(); e.stopPropagation(); openMenu(); }
+          return;
+        }
+        const handled = {
+          ArrowUp: () => row > 0 && toRow(row - 1),
+          ArrowDown: () => row < rows.length - 1 && toRow(row + 1),
+          ArrowLeft: () => (col > 0 ? go(row, col - 1) : openMenu()),
+          ArrowRight: () => col < rows[row].items.length - 1 && go(row, col + 1),
+          Enter: () => focused && focused.open()
+        }[e.key];
+        if (!handled) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat || e.key !== 'Enter') handled();
+      };
+
+      useEffect(() => {
+        const onKey = (e) => keys.current(e);
+        window.addEventListener('keydown', onKey, true);
+
+        // Back: from the menu to the cards, then to the first card, then out
+        window.__tvBackFirst = () => {
+          const el = document.activeElement;
+          if (el && el.closest && el.closest('.tv-menu')) {
+            const card = rootRef.current.querySelector('[data-tv-card].current');
+            if (card) { card.focus({ preventScroll: true }); return true; }
+            return false;
+          }
+          const { row: r, col: c } = atRef.current;
+          if (r === 0 && c === 0) return false;
+          setAt({ row: 0, col: 0 });
+          return true;
+        };
+        return () => {
+          window.removeEventListener('keydown', onKey, true);
+          window.__tvBackFirst = null;
+        };
+      }, []);
+
+      // A card focused another way (the app, after a video): the place follows
+      const onFocus = (e) => {
+        const place = e.target.dataset && e.target.dataset.tvCard;
+        if (!place) return;
+        const [r, c] = place.split(':').map(Number);
+        if (r !== row || c !== col) setAt({ row: r, col: c });
+      };
+
+      const name = user && user.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : '';
+      const backdrop = focused && (focused.backdrop || (rows[row].kind === 'wide' ? focused.image : ''));
+
+      return (
+        <div className="tv-home" ref={rootRef} onFocus={onFocus}>
+          <div className="tv-hero">
+            {backdrop
+              ? <div key={backdrop} className="tv-hero-backdrop" style={{ backgroundImage: `url("${backdrop}")` }}></div>
+              : focused && focused.logo && <div key={focused.key} className="tv-hero-logo"><img src={focused.logo} alt="" /></div>}
+            <div className="tv-hero-shade"></div>
+
+            <div className="tv-hero-top">
+              <span>{greeting()}{name ? `, ${name}` : ''}</span>
+              <span className="tv-clock">{clock.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}</span>
+            </div>
+
+            {focused ? (
+              <div key={focused.key} className="tv-hero-text">
+                <div className="tv-hero-kind">{rows[row].title}</div>
+                <h1>{focused.title}</h1>
+                {focused.programme ? (
+                  <React.Fragment>
+                    <div className="tv-hero-meta">
+                      <span className="tv-live">Live</span>
+                      {focused.programme.name} · {clockTime(focused.programme.start)} – {clockTime(focused.programme.stop)}
+                    </div>
+                    <div className="tv-progress wide"><span style={{ width: `${focused.progress * 100}%` }}></span></div>
+                  </React.Fragment>
+                ) : (
+                  <div className="tv-hero-meta">{[focused.subtitle, focused.note].filter(Boolean).join(' · ')}</div>
+                )}
+                {focused.status && <div className="tv-hero-status">{focused.status}</div>}
+                {focused.overview && <p>{focused.overview}</p>}
+              </div>
+            ) : (
+              <div className="tv-hero-text">
+                <h1>{greeting()}{name ? `, ${name}` : ''}</h1>
+                <p>Add channels, films and series to your favourites with the ☆ star and they appear here. Press left to open the menu.</p>
+              </div>
+            )}
+          </div>
+
+          <div className="tv-rows">
+            <div className="tv-rows-track" ref={railsRef} style={{ transform: `translateY(${-shift.y}px)` }}>
+              {rows.map((rail, r) => (
+                <section key={rail.id} className={`tv-row ${rail.kind} ${r === row ? 'current' : ''} ${r < row ? 'gone' : ''}`}>
+                  <h2>{rail.title}</h2>
+                  <div className="tv-row-track" style={{ transform: `translateX(${-(shift.x[rail.id] || 0)}px)` }}>
+                    {rail.items.map((item, c) => (
+                      <div
+                        key={item.key}
+                        className={`tv-card ${r === row && c === col ? 'current' : ''}`}
+                        data-tv-card={`${r}:${c}`}
+                        tabIndex={-1}
+                        onClick={() => { setAt({ row: r, col: c }); item.open(); }}
+                      >
+                        <div className="tv-card-image">
+                          {item.image
+                            ? <img src={item.image} alt="" loading="lazy" onError={(e) => { e.target.style.visibility = 'hidden'; }} />
+                            : item.logo
+                              ? <img className="logo" src={item.logo} alt="" loading="lazy" onError={(e) => { e.target.onerror = null; e.target.src = CHANNEL_LOGO_FALLBACK; }} />
+                              : <Icon name="film" size={28} />}
+                          {item.progress !== null && item.progress !== undefined && (
+                            <div className="tv-progress"><span style={{ width: `${Math.min(100, item.progress * 100)}%` }}></span></div>
+                          )}
+                          {item.status && <div className="tv-card-status">{!continuing.error && <span className="discover-spinner"></span>}</div>}
+                        </div>
+                        <div className="tv-card-title">{item.title}</div>
+                        {rail.kind !== 'poster' && <div className="tv-card-sub">{item.subtitle}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              ))}
+            </div>
+          </div>
+
+          {player.view}
+        </div>
+      );
+    }
+
+    // The TV app's menu: icons down the left, with their names while it has the focus.
+    // A part of the app chosen in it takes the focus once its content is there.
+    function TvMenu({ items, section }) {
+      const choose = (item) => {
+        item.onClick();
+        if (item.id === 'preferences' || item.id === 'logout') return;
+        const into = () => {
+          const el = document.activeElement;
+          if (el && el.closest && el.closest('.tv-menu') && window.__tvFocusFirst) window.__tvFocusFirst();
+        };
+        setTimeout(into, 350);
+        setTimeout(into, 1500);
+      };
+
+      return (
+        <div className="nav-rail tv-menu">
+          <div className="tv-menu-panel">
+            {items.map(item => item.spacer
+              ? <div key={item.key} className="nav-spacer"></div>
+              : (
+                <div
+                  key={item.id}
+                  className={`nav-item ${item.id === section ? 'active' : ''} ${item.danger ? 'nav-item-danger' : ''}`}
+                  tabIndex={0}
+                  onClick={() => choose(item)}
+                >
+                  <Icon name={item.icon} size={22} />
+                  <span className="tv-menu-label">{item.label}</span>
+                </div>
+              ))}
+          </div>
         </div>
       );
     }
@@ -5403,6 +5724,8 @@
 
       // From the dashboard: a channel, with its group open in the list
       const playFromHome = (channel) => {
+        // (in the TV app the video plays over the home, which stays below it)
+        if (TV_APP) return playChannel(channel);
         switchSection('tv');
         setSelectedGenre(channel.tv_genre_id);
         setShowChannels(true);
@@ -5601,6 +5924,21 @@
       return (
         <div className="app-layout">
           {/* Navigation Rail */}
+          {TV_APP ? (
+            <TvMenu section={section} items={[
+              { id: 'home', label: 'Home', icon: 'home', onClick: () => switchSection('home') },
+              modules.live && { id: 'tv', label: 'Live TV', icon: 'tv', onClick: () => switchSection('tv') },
+              modules.recordings && { id: 'guide', label: 'Recordings', icon: 'calendar', onClick: () => switchSection('guide') },
+              modules.library && { id: 'library', label: 'Library', icon: 'box', onClick: () => switchSection('library') },
+              user?.sections?.vod && { id: 'vod', label: 'Video Club', icon: 'film', onClick: () => switchSection('vod') },
+              user?.sections?.series && { id: 'series', label: 'Series', icon: 'layers', onClick: () => switchSection('series') },
+              modules.library && { id: 'recorded', label: 'Recorded', icon: 'grid', onClick: () => switchSection('recorded') },
+              modules.discover && { id: 'discover', label: 'Discover', icon: 'compass', onClick: () => switchSection('discover') },
+              { spacer: true, key: 'spacer' },
+              { id: 'preferences', label: 'Preferences', icon: 'droplet', onClick: () => setShowPreferences(true) },
+              { id: 'logout', label: 'Sign out', icon: 'logout', danger: true, onClick: handleLogout }
+            ].filter(Boolean)} />
+          ) : (
           <div className="nav-rail">
             <div className={`nav-item ${section === 'home' ? 'active' : ''}`} title="Home" onClick={() => switchSection('home')}><Icon name="home" /></div>
             {modules.live && (
@@ -5632,8 +5970,13 @@
             )}
             <div className="nav-item nav-item-danger" title="Sign Out" onClick={handleLogout}><Icon name="logout" /></div>
           </div>
+          )}
 
-          {section === 'home' && (
+          {section === 'home' && TV_APP && (
+            <TvHome user={user} modules={modules} channels={channels} onPlayChannel={playFromHome} onIntent={openFromHome} />
+          )}
+
+          {section === 'home' && !TV_APP && (
             <HomeDashboard
               user={user}
               modules={modules}

@@ -5468,3 +5468,369 @@ button.prefs-link {
   font: inherit;
   cursor: pointer;
 }
+
+/* ── TV app: sizes for a screen seen from the sofa ───────────────────────────
+   1rem is a sixtieth of the screen's width, whatever the TV's resolution; the
+   moving is done with transform and opacity only, which a TV box draws smoothly */
+
+html.tv-app {
+  font-size: calc(100vw / 60);
+}
+
+.tv-app ::-webkit-scrollbar {
+  display: none;
+}
+
+/* ── TV app: menu ─────────────────────────────────────────────────────────── */
+
+.tv-menu {
+  position: relative;
+  z-index: 40;
+  width: 5rem;
+  padding: 0;
+}
+
+.tv-menu-panel {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 1.6rem 0.9rem;
+  overflow: hidden;
+  transition: width 0.2s ease, background 0.2s ease;
+}
+
+.tv-menu:focus-within .tv-menu-panel {
+  width: 16rem;
+  background: linear-gradient(90deg, rgba(5, 6, 10, 0.97) 60%, rgba(5, 6, 10, 0.85));
+  box-shadow: 2rem 0 4rem rgba(0, 0, 0, 0.6);
+}
+
+.tv-menu .nav-item {
+  width: auto;
+  height: 2.5rem;
+  flex-shrink: 0;
+  justify-content: flex-start;
+  gap: 1.1rem;
+  padding: 0 0.85rem;
+  border-radius: 1.25rem;
+  white-space: nowrap;
+}
+
+.tv-menu .nav-item:focus {
+  outline: none;
+  background: #fff;
+  color: #000;
+}
+
+.tv-menu .nav-item.active:not(:focus) {
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+.tv-menu:not(:focus-within) .nav-item.active {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.tv-menu-label {
+  font-size: 1.05rem;
+  font-weight: 500;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tv-menu:focus-within .tv-menu-label {
+  opacity: 1;
+}
+
+/* ── TV app: home ─────────────────────────────────────────────────────────── */
+
+.tv-home {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  overflow: clip;
+  background: #05060a;
+  color: #fff;
+}
+
+.tv-hero {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 62vh;
+}
+
+.tv-hero-backdrop {
+  position: absolute;
+  inset: 0 0 0 28%;
+  background-size: cover;
+  background-position: center top;
+  animation: tv-fade 0.45s ease both;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 35%), linear-gradient(0deg, transparent, #000 40%);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(90deg, transparent, #000 35%), linear-gradient(0deg, transparent, #000 40%);
+  mask-composite: intersect;
+}
+
+.tv-hero-logo {
+  position: absolute;
+  right: 8rem;
+  top: 5rem;
+  width: 14rem;
+  height: 14rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 2rem;
+  background: radial-gradient(circle, rgba(255, 255, 255, 0.1), transparent 70%);
+  animation: tv-fade 0.35s ease both;
+}
+
+.tv-hero-logo img {
+  max-width: 75%;
+  max-height: 75%;
+  object-fit: contain;
+}
+
+.tv-hero-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #05060a 22%, rgba(5, 6, 10, 0.55) 55%, transparent 80%);
+  pointer-events: none;
+}
+
+.tv-hero-top {
+  position: absolute;
+  top: 1.8rem;
+  left: 7rem;
+  right: 3rem;
+  display: flex;
+  justify-content: space-between;
+  font-size: 1rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.tv-clock {
+  font-size: 1.2rem;
+  font-weight: 500;
+  color: #fff;
+}
+
+.tv-hero-text {
+  position: absolute;
+  left: 7rem;
+  top: 5.2rem;
+  width: 30rem;
+  animation: tv-rise 0.35s ease both;
+}
+
+.tv-hero-kind {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.tv-hero-text h1 {
+  margin: 0.4rem 0 0.6rem;
+  font-size: 2.6rem;
+  font-weight: 700;
+  line-height: 1.1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tv-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.05rem;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.tv-live {
+  padding: 0.1rem 0.5rem;
+  border-radius: 0.3rem;
+  background: #e5303a;
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.tv-hero-status {
+  margin-top: 0.6rem;
+  font-size: 0.95rem;
+  color: var(--accent-primary);
+}
+
+.tv-hero-text p {
+  margin: 0.9rem 0 0;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.7);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tv-progress {
+  position: absolute;
+  left: 0.6rem;
+  right: 0.6rem;
+  bottom: 0.5rem;
+  height: 0.25rem;
+  border-radius: 0.2rem;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+
+.tv-progress span {
+  display: block;
+  height: 100%;
+  background: #fff;
+}
+
+.tv-progress.wide {
+  position: relative;
+  inset: auto;
+  width: 16rem;
+  margin-top: 0.8rem;
+}
+
+/* The rows: the one in use slides up below the large card */
+
+.tv-rows {
+  position: absolute;
+  top: 52vh;
+  left: 5rem;
+  right: 0;
+  bottom: 0;
+  overflow: clip;
+}
+
+.tv-rows-track {
+  transition: transform 0.3s ease;
+}
+
+.tv-row {
+  padding: 0 0 1rem 2rem;
+  transition: opacity 0.3s ease;
+}
+
+.tv-row.gone {
+  opacity: 0;
+}
+
+.tv-row h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  transition: color 0.2s;
+}
+
+.tv-row.current h2 {
+  color: #fff;
+}
+
+.tv-row-track {
+  display: flex;
+  gap: 1rem;
+  padding: 0.6rem 0;
+  transition: transform 0.3s ease;
+}
+
+.tv-card {
+  flex-shrink: 0;
+  width: 13rem;
+}
+
+.tv-row.poster .tv-card { width: 7.5rem; }
+.tv-row.channel .tv-card { width: 11rem; }
+
+.tv-card:focus {
+  outline: none;
+}
+
+.tv-card-image {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  border-radius: 0.8rem;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.4);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tv-row.poster .tv-card-image { aspect-ratio: 2 / 3; }
+
+.tv-row.channel .tv-card-image {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04));
+}
+
+.tv-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tv-card-image img.logo {
+  width: 55%;
+  height: 60%;
+  object-fit: contain;
+}
+
+.tv-row.current .tv-card.current .tv-card-image {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 0.2rem #fff, 0 0.8rem 2rem rgba(0, 0, 0, 0.7);
+}
+
+.tv-card-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.tv-card-title,
+.tv-card-sub {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tv-card-title {
+  margin-top: 0.6rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.tv-card.current .tv-card-title { color: #fff; }
+
+.tv-card-sub {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+@keyframes tv-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes tv-rise {
+  from { opacity: 0; transform: translateY(0.6rem); }
+  to { opacity: 1; transform: none; }
+}
